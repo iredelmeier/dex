@@ -71,7 +71,7 @@ func serve(cmd *cobra.Command, args []string) error {
 	if c.Logger.Level != "" {
 		logger.Infof("config using log level: %s", c.Logger.Level)
 	}
-	tracer := instrumentation.NewTracer()
+	tracer := instrumentation.NewTracer(c.Tracer, "server")
 
 	// Fast checks. Perform these first for a more responsive CLI.
 	checks := []struct {

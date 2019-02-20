@@ -9,6 +9,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/dexidp/dex/instrumentation"
 	"github.com/dexidp/dex/server"
 	"github.com/dexidp/dex/storage"
 	"github.com/dexidp/dex/storage/etcd"
@@ -27,6 +28,8 @@ type Config struct {
 	GRPC      GRPC      `json:"grpc"`
 	Expiry    Expiry    `json:"expiry"`
 	Logger    Logger    `json:"logger"`
+
+	Tracer instrumentation.TracerConfig `json:"tracer"`
 
 	Frontend server.WebConfig `json:"frontend"`
 

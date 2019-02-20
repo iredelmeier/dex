@@ -32,6 +32,7 @@ require (
 	github.com/kr/pretty v0.1.0 // indirect
 	github.com/kylelemons/godebug v0.0.0-20160406211939-eadb3ce320cb
 	github.com/lib/pq v0.0.0-20181016162627-9eb73efc1fcc
+	github.com/lightstep/lightstep-tracer-go v0.15.6
 	github.com/mattn/go-sqlite3 v0.0.0-20160907162043-3fb7a0e792ed
 	github.com/matttproud/golang_protobuf_extensions v0.0.0-20150406173934-fc2b8d3a73c4 // indirect
 	github.com/opentracing-contrib/go-gorilla v0.0.0-20190110000444-ced666783644
