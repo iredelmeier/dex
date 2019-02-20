@@ -1,6 +1,7 @@
 package sql
 
 import (
+	"context"
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
@@ -815,10 +816,12 @@ func (c *conn) ListConnectors() ([]storage.Connector, error) {
 	return connectors, nil
 }
 
-func (c *conn) DeleteAuthRequest(id string) error { return c.delete("auth_request", "id", id) }
-func (c *conn) DeleteAuthCode(id string) error    { return c.delete("auth_code", "id", id) }
-func (c *conn) DeleteClient(id string) error      { return c.delete("client", "id", id) }
-func (c *conn) DeleteRefresh(id string) error     { return c.delete("refresh_token", "id", id) }
+func (c *conn) DeleteAuthRequest(ctx context.Context, id string) error {
+	return c.delete("auth_request", "id", id)
+}
+func (c *conn) DeleteAuthCode(id string) error { return c.delete("auth_code", "id", id) }
+func (c *conn) DeleteClient(id string) error   { return c.delete("client", "id", id) }
+func (c *conn) DeleteRefresh(id string) error  { return c.delete("refresh_token", "id", id) }
 func (c *conn) DeletePassword(email string) error {
 	return c.delete("password", "email", strings.ToLower(email))
 }

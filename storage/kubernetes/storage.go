@@ -403,7 +403,7 @@ func (cli *client) ListConnectors() (connectors []storage.Connector, err error) 
 	return
 }
 
-func (cli *client) DeleteAuthRequest(id string) error {
+func (cli *client) DeleteAuthRequest(ctx context.Context, id string) error {
 	return cli.delete(resourceAuthRequest, id)
 }
 

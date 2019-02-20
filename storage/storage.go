@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base32"
 	"errors"
@@ -72,7 +73,7 @@ type Storage interface {
 	ListConnectors() ([]Connector, error)
 
 	// Delete methods MUST be atomic.
-	DeleteAuthRequest(id string) error
+	DeleteAuthRequest(ctx context.Context, id string) error
 	DeleteAuthCode(code string) error
 	DeleteClient(id string) error
 	DeleteRefresh(id string) error

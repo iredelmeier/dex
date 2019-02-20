@@ -1,6 +1,7 @@
 package tracedstorage
 
 import (
+	"context"
 	"time"
 
 	"github.com/dexidp/dex/instrumentation"
@@ -10,6 +11,7 @@ import (
 
 func TraceStorage(parent storage.Storage, c instrumentation.TracerConfig) storage.Storage {
 	tracer := instrumentation.NewTracer(c, "storage")
+	opentracing.SetGlobalTracer(tracer)
 
 	return &tracedStorage{
 		parent: parent,
@@ -162,11 +164,11 @@ func (s *tracedStorage) ListConnectors() ([]storage.Connector, error) {
 	return s.parent.ListConnectors()
 }
 
-func (s *tracedStorage) DeleteAuthRequest(id string) error {
-	span := s.tracer.StartSpan("storage.DeleteAuthRequest")
+func (s *tracedStorage) DeleteAuthRequest(ctx context.Context, id string) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.DeleteAuthRequest")
 	defer span.Finish()
 
-	return s.parent.DeleteAuthRequest(id)
+	return s.parent.DeleteAuthRequest(ctx, id)
 }
 
 func (s *tracedStorage) DeleteAuthCode(code string) error {

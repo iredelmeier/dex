@@ -109,8 +109,8 @@ func (c *conn) UpdateAuthRequest(id string, updater func(a storage.AuthRequest) 
 	})
 }
 
-func (c *conn) DeleteAuthRequest(id string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultStorageTimeout)
+func (c *conn) DeleteAuthRequest(ctx context.Context, id string) error {
+	ctx, cancel := context.WithTimeout(ctx, defaultStorageTimeout)
 	defer cancel()
 	return c.deleteKey(ctx, keyID(authRequestPrefix, id))
 }

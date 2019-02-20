@@ -2,6 +2,7 @@
 package memory
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"time"
@@ -331,7 +332,7 @@ func (s *memStorage) DeleteAuthCode(id string) (err error) {
 	return
 }
 
-func (s *memStorage) DeleteAuthRequest(id string) (err error) {
+func (s *memStorage) DeleteAuthRequest(ctx context.Context, id string) (err error) {
 	s.tx(func() {
 		if _, ok := s.authReqs[id]; !ok {
 			err = storage.ErrNotFound

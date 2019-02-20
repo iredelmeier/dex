@@ -29,7 +29,7 @@ func (s *Server) newHealthChecker(ctx context.Context) http.Handler {
 
 	// Perform one health check synchronously so the returned handler returns
 	// valid data immediately.
-	h.runHealthCheck()
+	h.runHealthCheck(ctx)
 
 	go func() {
 		for {
@@ -38,7 +38,7 @@ func (s *Server) newHealthChecker(ctx context.Context) http.Handler {
 				return
 			case <-time.After(time.Second * 15):
 			}
-			h.runHealthCheck()
+			h.runHealthCheck(ctx)
 		}
 	}()
 	return h
@@ -59,9 +59,9 @@ type healthChecker struct {
 
 // runHealthCheck performs a single health check and makes the result available
 // for any clients performing and HTTP request against the healthChecker.
-func (h *healthChecker) runHealthCheck() {
+func (h *healthChecker) runHealthCheck(ctx context.Context) {
 	t := h.s.now()
-	err := checkStorageHealth(h.s.storage, h.s.now)
+	err := checkStorageHealth(ctx, h.s.storage, h.s.now)
 	passed := h.s.now().Sub(t)
 	if err != nil {
 		h.s.logger.Errorf("Storage health check failed: %v", err)
@@ -75,7 +75,7 @@ func (h *healthChecker) runHealthCheck() {
 	h.mu.Unlock()
 }
 
-func checkStorageHealth(s storage.Storage, now func() time.Time) error {
+func checkStorageHealth(ctx context.Context, s storage.Storage, now func() time.Time) error {
 	a := storage.AuthRequest{
 		ID:       storage.NewID(),
 		ClientID: storage.NewID(),
@@ -87,7 +87,7 @@ func checkStorageHealth(s storage.Storage, now func() time.Time) error {
 	if err := s.CreateAuthRequest(a); err != nil {
 		return fmt.Errorf("create auth request: %v", err)
 	}
-	if err := s.DeleteAuthRequest(a.ID); err != nil {
+	if err := s.DeleteAuthRequest(ctx, a.ID); err != nil {
 		return fmt.Errorf("delete auth request: %v", err)
 	}
 	return nil
@@ -526,12 +526,13 @@ func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) sendCodeResponse(w http.ResponseWriter, r *http.Request, authReq storage.AuthRequest) {
+	ctx := r.Context()
 	if s.now().After(authReq.Expiry) {
 		s.renderError(w, http.StatusBadRequest, "User session has expired.")
 		return
 	}
 
-	if err := s.storage.DeleteAuthRequest(authReq.ID); err != nil {
+	if err := s.storage.DeleteAuthRequest(ctx, authReq.ID); err != nil {
 		if err != storage.ErrNotFound {
 			s.logger.Errorf("Failed to delete authorization request: %v", err)
 			s.renderError(w, http.StatusInternalServerError, "Internal server error.")
