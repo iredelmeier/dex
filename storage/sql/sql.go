@@ -2,6 +2,7 @@
 package sql
 
 import (
+	"context"
 	"database/sql"
 	"regexp"
 	"time"
@@ -117,7 +118,7 @@ type conn struct {
 	alreadyExistsCheck func(err error) bool
 }
 
-func (c *conn) Close() error {
+func (c *conn) Close(ctx context.Context) error {
 	return c.db.Close()
 }
 

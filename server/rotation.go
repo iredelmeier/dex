@@ -10,9 +10,8 @@ import (
 	"io"
 	"time"
 
-	"gopkg.in/square/go-jose.v2"
-
 	"github.com/sirupsen/logrus"
+	jose "gopkg.in/square/go-jose.v2"
 
 	"github.com/dexidp/dex/storage"
 )
@@ -73,7 +72,7 @@ func (s *Server) startKeyRotation(ctx context.Context, strategy rotationStrategy
 	rotater := keyRotater{s.storage, strategy, now, s.logger}
 
 	// Try to rotate immediately so properly configured storages will have keys.
-	if err := rotater.rotate(); err != nil {
+	if err := rotater.rotate(ctx); err != nil {
 		if err == errAlreadyRotated {
 			s.logger.Infof("Key rotation not needed: %v", err)
 		} else {
@@ -87,7 +86,7 @@ func (s *Server) startKeyRotation(ctx context.Context, strategy rotationStrategy
 			case <-ctx.Done():
 				return
 			case <-time.After(time.Second * 30):
-				if err := rotater.rotate(); err != nil {
+				if err := rotater.rotate(ctx); err != nil {
 					s.logger.Errorf("failed to rotate keys: %v", err)
 				}
 			}
@@ -96,8 +95,8 @@ func (s *Server) startKeyRotation(ctx context.Context, strategy rotationStrategy
 	return
 }
 
-func (k keyRotater) rotate() error {
-	keys, err := k.GetKeys()
+func (k keyRotater) rotate(ctx context.Context) error {
+	keys, err := k.GetKeys(ctx)
 	if err != nil && err != storage.ErrNotFound {
 		return fmt.Errorf("get keys: %v", err)
 	}
@@ -130,7 +129,7 @@ func (k keyRotater) rotate() error {
 	}
 
 	var nextRotation time.Time
-	err = k.Storage.UpdateKeys(func(keys storage.Keys) (storage.Keys, error) {
+	err = k.Storage.UpdateKeys(ctx, func(keys storage.Keys) (storage.Keys, error) {
 		tNow := k.now()
 
 		// if you are running multiple instances of dex, another instance

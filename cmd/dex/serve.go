@@ -15,6 +15,7 @@ import (
 
 	"github.com/ghodss/yaml"
 	grpcprometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
@@ -72,7 +73,7 @@ func serve(cmd *cobra.Command, args []string) error {
 	if c.Logger.Level != "" {
 		logger.Infof("config using log level: %s", c.Logger.Level)
 	}
-	tracer := instrumentation.NewTracer(c.Tracer, "server")
+	serverTracer := instrumentation.NewTracer(c.Tracer, "server")
 
 	// Fast checks. Perform these first for a more responsive CLI.
 	checks := []struct {
@@ -161,7 +162,10 @@ func serve(cmd *cobra.Command, args []string) error {
 	}
 	logger.Infof("config storage: %s", c.Storage.Type)
 
-	s = tracedstorage.TraceStorage(s, c.Tracer)
+	storageTracer := instrumentation.NewTracer(c.Tracer, "storage")
+	opentracing.SetGlobalTracer(storageTracer)
+
+	s = tracedstorage.TraceStorage(s)
 
 	if len(c.StaticClients) > 0 {
 		for _, client := range c.StaticClients {
@@ -228,7 +232,7 @@ func serve(cmd *cobra.Command, args []string) error {
 		Storage:                s,
 		Web:                    c.Frontend,
 		Logger:                 logger,
-		Tracer:                 tracer,
+		Tracer:                 serverTracer,
 		Now:                    now,
 		PrometheusRegistry:     prometheusRegistry,
 	}

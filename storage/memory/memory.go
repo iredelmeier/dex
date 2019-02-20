@@ -65,9 +65,9 @@ func (s *memStorage) tx(f func()) {
 	f()
 }
 
-func (s *memStorage) Close() error { return nil }
+func (s *memStorage) Close(ctx context.Context) error { return nil }
 
-func (s *memStorage) GarbageCollect(now time.Time) (result storage.GCResult, err error) {
+func (s *memStorage) GarbageCollect(ctx context.Context, now time.Time) (result storage.GCResult, err error) {
 	s.tx(func() {
 		for id, a := range s.authCodes {
 			if now.After(a.Expiry) {
@@ -85,7 +85,7 @@ func (s *memStorage) GarbageCollect(now time.Time) (result storage.GCResult, err
 	return result, nil
 }
 
-func (s *memStorage) CreateClient(c storage.Client) (err error) {
+func (s *memStorage) CreateClient(ctx context.Context, c storage.Client) (err error) {
 	s.tx(func() {
 		if _, ok := s.clients[c.ID]; ok {
 			err = storage.ErrAlreadyExists
@@ -96,7 +96,7 @@ func (s *memStorage) CreateClient(c storage.Client) (err error) {
 	return
 }
 
-func (s *memStorage) CreateAuthCode(c storage.AuthCode) (err error) {
+func (s *memStorage) CreateAuthCode(ctx context.Context, c storage.AuthCode) (err error) {
 	s.tx(func() {
 		if _, ok := s.authCodes[c.ID]; ok {
 			err = storage.ErrAlreadyExists
@@ -107,7 +107,7 @@ func (s *memStorage) CreateAuthCode(c storage.AuthCode) (err error) {
 	return
 }
 
-func (s *memStorage) CreateRefresh(r storage.RefreshToken) (err error) {
+func (s *memStorage) CreateRefresh(ctx context.Context, r storage.RefreshToken) (err error) {
 	s.tx(func() {
 		if _, ok := s.refreshTokens[r.ID]; ok {
 			err = storage.ErrAlreadyExists
@@ -118,7 +118,7 @@ func (s *memStorage) CreateRefresh(r storage.RefreshToken) (err error) {
 	return
 }
 
-func (s *memStorage) CreateAuthRequest(a storage.AuthRequest) (err error) {
+func (s *memStorage) CreateAuthRequest(_ context.Context, a storage.AuthRequest) (err error) {
 	s.tx(func() {
 		if _, ok := s.authReqs[a.ID]; ok {
 			err = storage.ErrAlreadyExists
@@ -129,7 +129,7 @@ func (s *memStorage) CreateAuthRequest(a storage.AuthRequest) (err error) {
 	return
 }
 
-func (s *memStorage) CreatePassword(p storage.Password) (err error) {
+func (s *memStorage) CreatePassword(ctx context.Context, p storage.Password) (err error) {
 	lowerEmail := strings.ToLower(p.Email)
 	s.tx(func() {
 		if _, ok := s.passwords[lowerEmail]; ok {
@@ -141,7 +141,7 @@ func (s *memStorage) CreatePassword(p storage.Password) (err error) {
 	return
 }
 
-func (s *memStorage) CreateOfflineSessions(o storage.OfflineSessions) (err error) {
+func (s *memStorage) CreateOfflineSessions(ctx context.Context, o storage.OfflineSessions) (err error) {
 	id := offlineSessionID{
 		userID: o.UserID,
 		connID: o.ConnID,
@@ -156,7 +156,7 @@ func (s *memStorage) CreateOfflineSessions(o storage.OfflineSessions) (err error
 	return
 }
 
-func (s *memStorage) CreateConnector(connector storage.Connector) (err error) {
+func (s *memStorage) CreateConnector(ctx context.Context, connector storage.Connector) (err error) {
 	s.tx(func() {
 		if _, ok := s.connectors[connector.ID]; ok {
 			err = storage.ErrAlreadyExists
@@ -167,7 +167,7 @@ func (s *memStorage) CreateConnector(connector storage.Connector) (err error) {
 	return
 }
 
-func (s *memStorage) GetAuthCode(id string) (c storage.AuthCode, err error) {
+func (s *memStorage) GetAuthCode(_ context.Context, id string) (c storage.AuthCode, err error) {
 	s.tx(func() {
 		var ok bool
 		if c, ok = s.authCodes[id]; !ok {
@@ -178,7 +178,7 @@ func (s *memStorage) GetAuthCode(id string) (c storage.AuthCode, err error) {
 	return
 }
 
-func (s *memStorage) GetPassword(email string) (p storage.Password, err error) {
+func (s *memStorage) GetPassword(ctx context.Context, email string) (p storage.Password, err error) {
 	email = strings.ToLower(email)
 	s.tx(func() {
 		var ok bool
@@ -189,7 +189,7 @@ func (s *memStorage) GetPassword(email string) (p storage.Password, err error) {
 	return
 }
 
-func (s *memStorage) GetClient(id string) (client storage.Client, err error) {
+func (s *memStorage) GetClient(ctx context.Context, id string) (client storage.Client, err error) {
 	s.tx(func() {
 		var ok bool
 		if client, ok = s.clients[id]; !ok {
@@ -199,12 +199,12 @@ func (s *memStorage) GetClient(id string) (client storage.Client, err error) {
 	return
 }
 
-func (s *memStorage) GetKeys() (keys storage.Keys, err error) {
+func (s *memStorage) GetKeys(ctx context.Context) (keys storage.Keys, err error) {
 	s.tx(func() { keys = s.keys })
 	return
 }
 
-func (s *memStorage) GetRefresh(id string) (tok storage.RefreshToken, err error) {
+func (s *memStorage) GetRefresh(ctx context.Context, id string) (tok storage.RefreshToken, err error) {
 	s.tx(func() {
 		var ok bool
 		if tok, ok = s.refreshTokens[id]; !ok {
@@ -215,7 +215,7 @@ func (s *memStorage) GetRefresh(id string) (tok storage.RefreshToken, err error)
 	return
 }
 
-func (s *memStorage) GetAuthRequest(id string) (req storage.AuthRequest, err error) {
+func (s *memStorage) GetAuthRequest(ctx context.Context, id string) (req storage.AuthRequest, err error) {
 	s.tx(func() {
 		var ok bool
 		if req, ok = s.authReqs[id]; !ok {
@@ -226,7 +226,7 @@ func (s *memStorage) GetAuthRequest(id string) (req storage.AuthRequest, err err
 	return
 }
 
-func (s *memStorage) GetOfflineSessions(userID string, connID string) (o storage.OfflineSessions, err error) {
+func (s *memStorage) GetOfflineSessions(ctx context.Context, userID string, connID string) (o storage.OfflineSessions, err error) {
 	id := offlineSessionID{
 		userID: userID,
 		connID: connID,
@@ -241,7 +241,7 @@ func (s *memStorage) GetOfflineSessions(userID string, connID string) (o storage
 	return
 }
 
-func (s *memStorage) GetConnector(id string) (connector storage.Connector, err error) {
+func (s *memStorage) GetConnector(ctx context.Context, id string) (connector storage.Connector, err error) {
 	s.tx(func() {
 		var ok bool
 		if connector, ok = s.connectors[id]; !ok {
@@ -251,7 +251,7 @@ func (s *memStorage) GetConnector(id string) (connector storage.Connector, err e
 	return
 }
 
-func (s *memStorage) ListClients() (clients []storage.Client, err error) {
+func (s *memStorage) ListClients(ctx context.Context) (clients []storage.Client, err error) {
 	s.tx(func() {
 		for _, client := range s.clients {
 			clients = append(clients, client)
@@ -260,7 +260,7 @@ func (s *memStorage) ListClients() (clients []storage.Client, err error) {
 	return
 }
 
-func (s *memStorage) ListRefreshTokens() (tokens []storage.RefreshToken, err error) {
+func (s *memStorage) ListRefreshTokens(ctx context.Context) (tokens []storage.RefreshToken, err error) {
 	s.tx(func() {
 		for _, refresh := range s.refreshTokens {
 			tokens = append(tokens, refresh)
@@ -269,7 +269,7 @@ func (s *memStorage) ListRefreshTokens() (tokens []storage.RefreshToken, err err
 	return
 }
 
-func (s *memStorage) ListPasswords() (passwords []storage.Password, err error) {
+func (s *memStorage) ListPasswords(ctx context.Context) (passwords []storage.Password, err error) {
 	s.tx(func() {
 		for _, password := range s.passwords {
 			passwords = append(passwords, password)
@@ -278,7 +278,7 @@ func (s *memStorage) ListPasswords() (passwords []storage.Password, err error) {
 	return
 }
 
-func (s *memStorage) ListConnectors() (conns []storage.Connector, err error) {
+func (s *memStorage) ListConnectors(ctx context.Context) (conns []storage.Connector, err error) {
 	s.tx(func() {
 		for _, c := range s.connectors {
 			conns = append(conns, c)
@@ -287,7 +287,7 @@ func (s *memStorage) ListConnectors() (conns []storage.Connector, err error) {
 	return
 }
 
-func (s *memStorage) DeletePassword(email string) (err error) {
+func (s *memStorage) DeletePassword(ctx context.Context, email string) (err error) {
 	email = strings.ToLower(email)
 	s.tx(func() {
 		if _, ok := s.passwords[email]; !ok {
@@ -299,7 +299,7 @@ func (s *memStorage) DeletePassword(email string) (err error) {
 	return
 }
 
-func (s *memStorage) DeleteClient(id string) (err error) {
+func (s *memStorage) DeleteClient(ctx context.Context, id string) (err error) {
 	s.tx(func() {
 		if _, ok := s.clients[id]; !ok {
 			err = storage.ErrNotFound
@@ -310,7 +310,7 @@ func (s *memStorage) DeleteClient(id string) (err error) {
 	return
 }
 
-func (s *memStorage) DeleteRefresh(id string) (err error) {
+func (s *memStorage) DeleteRefresh(ctx context.Context, id string) (err error) {
 	s.tx(func() {
 		if _, ok := s.refreshTokens[id]; !ok {
 			err = storage.ErrNotFound
@@ -321,7 +321,7 @@ func (s *memStorage) DeleteRefresh(id string) (err error) {
 	return
 }
 
-func (s *memStorage) DeleteAuthCode(id string) (err error) {
+func (s *memStorage) DeleteAuthCode(ctx context.Context, id string) (err error) {
 	s.tx(func() {
 		if _, ok := s.authCodes[id]; !ok {
 			err = storage.ErrNotFound
@@ -343,7 +343,7 @@ func (s *memStorage) DeleteAuthRequest(ctx context.Context, id string) (err erro
 	return
 }
 
-func (s *memStorage) DeleteOfflineSessions(userID string, connID string) (err error) {
+func (s *memStorage) DeleteOfflineSessions(ctx context.Context, userID string, connID string) (err error) {
 	id := offlineSessionID{
 		userID: userID,
 		connID: connID,
@@ -358,7 +358,7 @@ func (s *memStorage) DeleteOfflineSessions(userID string, connID string) (err er
 	return
 }
 
-func (s *memStorage) DeleteConnector(id string) (err error) {
+func (s *memStorage) DeleteConnector(ctx context.Context, id string) (err error) {
 	s.tx(func() {
 		if _, ok := s.connectors[id]; !ok {
 			err = storage.ErrNotFound
@@ -369,7 +369,7 @@ func (s *memStorage) DeleteConnector(id string) (err error) {
 	return
 }
 
-func (s *memStorage) UpdateClient(id string, updater func(old storage.Client) (storage.Client, error)) (err error) {
+func (s *memStorage) UpdateClient(ctx context.Context, id string, updater func(old storage.Client) (storage.Client, error)) (err error) {
 	s.tx(func() {
 		client, ok := s.clients[id]
 		if !ok {
@@ -383,7 +383,7 @@ func (s *memStorage) UpdateClient(id string, updater func(old storage.Client) (s
 	return
 }
 
-func (s *memStorage) UpdateKeys(updater func(old storage.Keys) (storage.Keys, error)) (err error) {
+func (s *memStorage) UpdateKeys(ctx context.Context, updater func(old storage.Keys) (storage.Keys, error)) (err error) {
 	s.tx(func() {
 		var keys storage.Keys
 		if keys, err = updater(s.keys); err == nil {
@@ -393,7 +393,7 @@ func (s *memStorage) UpdateKeys(updater func(old storage.Keys) (storage.Keys, er
 	return
 }
 
-func (s *memStorage) UpdateAuthRequest(id string, updater func(old storage.AuthRequest) (storage.AuthRequest, error)) (err error) {
+func (s *memStorage) UpdateAuthRequest(ctx context.Context, id string, updater func(old storage.AuthRequest) (storage.AuthRequest, error)) (err error) {
 	s.tx(func() {
 		req, ok := s.authReqs[id]
 		if !ok {
@@ -407,7 +407,7 @@ func (s *memStorage) UpdateAuthRequest(id string, updater func(old storage.AuthR
 	return
 }
 
-func (s *memStorage) UpdatePassword(email string, updater func(p storage.Password) (storage.Password, error)) (err error) {
+func (s *memStorage) UpdatePassword(ctx context.Context, email string, updater func(p storage.Password) (storage.Password, error)) (err error) {
 	email = strings.ToLower(email)
 	s.tx(func() {
 		req, ok := s.passwords[email]
@@ -422,7 +422,7 @@ func (s *memStorage) UpdatePassword(email string, updater func(p storage.Passwor
 	return
 }
 
-func (s *memStorage) UpdateRefreshToken(id string, updater func(p storage.RefreshToken) (storage.RefreshToken, error)) (err error) {
+func (s *memStorage) UpdateRefreshToken(ctx context.Context, id string, updater func(p storage.RefreshToken) (storage.RefreshToken, error)) (err error) {
 	s.tx(func() {
 		r, ok := s.refreshTokens[id]
 		if !ok {
@@ -436,7 +436,7 @@ func (s *memStorage) UpdateRefreshToken(id string, updater func(p storage.Refres
 	return
 }
 
-func (s *memStorage) UpdateOfflineSessions(userID string, connID string, updater func(o storage.OfflineSessions) (storage.OfflineSessions, error)) (err error) {
+func (s *memStorage) UpdateOfflineSessions(ctx context.Context, userID string, connID string, updater func(o storage.OfflineSessions) (storage.OfflineSessions, error)) (err error) {
 	id := offlineSessionID{
 		userID: userID,
 		connID: connID,
@@ -454,7 +454,7 @@ func (s *memStorage) UpdateOfflineSessions(userID string, connID string, updater
 	return
 }
 
-func (s *memStorage) UpdateConnector(id string, updater func(c storage.Connector) (storage.Connector, error)) (err error) {
+func (s *memStorage) UpdateConnector(ctx context.Context, id string, updater func(c storage.Connector) (storage.Connector, error)) (err error) {
 	s.tx(func() {
 		r, ok := s.connectors[id]
 		if !ok {

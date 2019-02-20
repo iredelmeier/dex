@@ -67,7 +67,7 @@ func (d dexAPI) CreateClient(ctx context.Context, req *api.CreateClientReq) (*ap
 		Name:         req.Client.Name,
 		LogoURL:      req.Client.LogoUrl,
 	}
-	if err := d.s.CreateClient(c); err != nil {
+	if err := d.s.CreateClient(ctx, c); err != nil {
 		if err == storage.ErrAlreadyExists {
 			return &api.CreateClientResp{AlreadyExists: true}, nil
 		}
@@ -85,7 +85,7 @@ func (d dexAPI) UpdateClient(ctx context.Context, req *api.UpdateClientReq) (*ap
 		return nil, errors.New("update client: no client ID supplied")
 	}
 
-	err := d.s.UpdateClient(req.Id, func(old storage.Client) (storage.Client, error) {
+	err := d.s.UpdateClient(ctx, req.Id, func(old storage.Client) (storage.Client, error) {
 		if req.RedirectUris != nil {
 			old.RedirectURIs = req.RedirectUris
 		}
@@ -112,7 +112,7 @@ func (d dexAPI) UpdateClient(ctx context.Context, req *api.UpdateClientReq) (*ap
 }
 
 func (d dexAPI) DeleteClient(ctx context.Context, req *api.DeleteClientReq) (*api.DeleteClientResp, error) {
-	err := d.s.DeleteClient(req.Id)
+	err := d.s.DeleteClient(ctx, req.Id)
 	if err != nil {
 		if err == storage.ErrNotFound {
 			return &api.DeleteClientResp{NotFound: true}, nil
@@ -160,7 +160,7 @@ func (d dexAPI) CreatePassword(ctx context.Context, req *api.CreatePasswordReq) 
 		Username: req.Password.Username,
 		UserID:   req.Password.UserId,
 	}
-	if err := d.s.CreatePassword(p); err != nil {
+	if err := d.s.CreatePassword(ctx, p); err != nil {
 		if err == storage.ErrAlreadyExists {
 			return &api.CreatePasswordResp{AlreadyExists: true}, nil
 		}
@@ -197,7 +197,7 @@ func (d dexAPI) UpdatePassword(ctx context.Context, req *api.UpdatePasswordReq) 
 		return old, nil
 	}
 
-	if err := d.s.UpdatePassword(req.Email, updater); err != nil {
+	if err := d.s.UpdatePassword(ctx, req.Email, updater); err != nil {
 		if err == storage.ErrNotFound {
 			return &api.UpdatePasswordResp{NotFound: true}, nil
 		}
@@ -213,7 +213,7 @@ func (d dexAPI) DeletePassword(ctx context.Context, req *api.DeletePasswordReq) 
 		return nil, errors.New("no email supplied")
 	}
 
-	err := d.s.DeletePassword(req.Email)
+	err := d.s.DeletePassword(ctx, req.Email)
 	if err != nil {
 		if err == storage.ErrNotFound {
 			return &api.DeletePasswordResp{NotFound: true}, nil
@@ -233,7 +233,7 @@ func (d dexAPI) GetVersion(ctx context.Context, req *api.VersionReq) (*api.Versi
 }
 
 func (d dexAPI) ListPasswords(ctx context.Context, req *api.ListPasswordReq) (*api.ListPasswordResp, error) {
-	passwordList, err := d.s.ListPasswords()
+	passwordList, err := d.s.ListPasswords(ctx)
 	if err != nil {
 		d.logger.Errorf("api: failed to list passwords: %v", err)
 		return nil, fmt.Errorf("list passwords: %v", err)
@@ -263,7 +263,7 @@ func (d dexAPI) ListRefresh(ctx context.Context, req *api.ListRefreshReq) (*api.
 	}
 
 	var refreshTokenRefs []*api.RefreshTokenRef
-	offlineSessions, err := d.s.GetOfflineSessions(id.UserId, id.ConnId)
+	offlineSessions, err := d.s.GetOfflineSessions(ctx, id.UserId, id.ConnId)
 	if err != nil {
 		if err == storage.ErrNotFound {
 			// This means that this user-client pair does not have a refresh token yet.
@@ -318,7 +318,7 @@ func (d dexAPI) RevokeRefresh(ctx context.Context, req *api.RevokeRefreshReq) (*
 		return old, nil
 	}
 
-	if err := d.s.UpdateOfflineSessions(id.UserId, id.ConnId, updater); err != nil {
+	if err := d.s.UpdateOfflineSessions(ctx, id.UserId, id.ConnId, updater); err != nil {
 		if err == storage.ErrNotFound {
 			return &api.RevokeRefreshResp{NotFound: true}, nil
 		}
@@ -334,7 +334,7 @@ func (d dexAPI) RevokeRefresh(ctx context.Context, req *api.RevokeRefreshReq) (*
 	//
 	// TODO(ericchiang): we don't have any good recourse if this call fails.
 	// Consider garbage collection of refresh tokens with no associated ref.
-	if err := d.s.DeleteRefresh(refreshID); err != nil {
+	if err := d.s.DeleteRefresh(ctx, refreshID); err != nil {
 		d.logger.Errorf("failed to delete refresh token: %v", err)
 		return nil, err
 	}

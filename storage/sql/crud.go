@@ -85,7 +85,7 @@ type scanner interface {
 	Scan(dest ...interface{}) error
 }
 
-func (c *conn) GarbageCollect(now time.Time) (result storage.GCResult, err error) {
+func (c *conn) GarbageCollect(ctx context.Context, now time.Time) (result storage.GCResult, err error) {
 	r, err := c.Exec(`delete from auth_request where expiry < $1`, now)
 	if err != nil {
 		return result, fmt.Errorf("gc auth_request: %v", err)
@@ -104,7 +104,7 @@ func (c *conn) GarbageCollect(now time.Time) (result storage.GCResult, err error
 	return
 }
 
-func (c *conn) CreateAuthRequest(a storage.AuthRequest) error {
+func (c *conn) CreateAuthRequest(ctx context.Context, a storage.AuthRequest) error {
 	_, err := c.Exec(`
 		insert into auth_request (
 			id, client_id, response_types, scopes, redirect_uri, nonce, state,
@@ -134,7 +134,7 @@ func (c *conn) CreateAuthRequest(a storage.AuthRequest) error {
 	return nil
 }
 
-func (c *conn) UpdateAuthRequest(id string, updater func(a storage.AuthRequest) (storage.AuthRequest, error)) error {
+func (c *conn) UpdateAuthRequest(ctx context.Context, id string, updater func(a storage.AuthRequest) (storage.AuthRequest, error)) error {
 	return c.ExecTx(func(tx *trans) error {
 		r, err := getAuthRequest(tx, id)
 		if err != nil {
@@ -172,7 +172,7 @@ func (c *conn) UpdateAuthRequest(id string, updater func(a storage.AuthRequest) 
 
 }
 
-func (c *conn) GetAuthRequest(id string) (storage.AuthRequest, error) {
+func (c *conn) GetAuthRequest(ctx context.Context, id string) (storage.AuthRequest, error) {
 	return getAuthRequest(c, id)
 }
 
@@ -201,7 +201,7 @@ func getAuthRequest(q querier, id string) (a storage.AuthRequest, err error) {
 	return a, nil
 }
 
-func (c *conn) CreateAuthCode(a storage.AuthCode) error {
+func (c *conn) CreateAuthCode(ctx context.Context, a storage.AuthCode) error {
 	_, err := c.Exec(`
 		insert into auth_code (
 			id, client_id, scopes, nonce, redirect_uri,
@@ -226,7 +226,7 @@ func (c *conn) CreateAuthCode(a storage.AuthCode) error {
 	return nil
 }
 
-func (c *conn) GetAuthCode(id string) (a storage.AuthCode, err error) {
+func (c *conn) GetAuthCode(ctx context.Context, id string) (a storage.AuthCode, err error) {
 	err = c.QueryRow(`
 		select
 			id, client_id, scopes, nonce, redirect_uri,
@@ -249,7 +249,7 @@ func (c *conn) GetAuthCode(id string) (a storage.AuthCode, err error) {
 	return a, nil
 }
 
-func (c *conn) CreateRefresh(r storage.RefreshToken) error {
+func (c *conn) CreateRefresh(ctx context.Context, r storage.RefreshToken) error {
 	_, err := c.Exec(`
 		insert into refresh_token (
 			id, client_id, scopes, nonce,
@@ -275,7 +275,7 @@ func (c *conn) CreateRefresh(r storage.RefreshToken) error {
 	return nil
 }
 
-func (c *conn) UpdateRefreshToken(id string, updater func(old storage.RefreshToken) (storage.RefreshToken, error)) error {
+func (c *conn) UpdateRefreshToken(ctx context.Context, id string, updater func(old storage.RefreshToken) (storage.RefreshToken, error)) error {
 	return c.ExecTx(func(tx *trans) error {
 		r, err := getRefresh(tx, id)
 		if err != nil {
@@ -316,7 +316,7 @@ func (c *conn) UpdateRefreshToken(id string, updater func(old storage.RefreshTok
 	})
 }
 
-func (c *conn) GetRefresh(id string) (storage.RefreshToken, error) {
+func (c *conn) GetRefresh(ctx context.Context, id string) (storage.RefreshToken, error) {
 	return getRefresh(c, id)
 }
 
@@ -332,7 +332,7 @@ func getRefresh(q querier, id string) (storage.RefreshToken, error) {
 	`, id))
 }
 
-func (c *conn) ListRefreshTokens() ([]storage.RefreshToken, error) {
+func (c *conn) ListRefreshTokens(ctx context.Context) ([]storage.RefreshToken, error) {
 	rows, err := c.Query(`
 		select
 			id, client_id, scopes, nonce,
@@ -376,7 +376,7 @@ func scanRefresh(s scanner) (r storage.RefreshToken, err error) {
 	return r, nil
 }
 
-func (c *conn) UpdateKeys(updater func(old storage.Keys) (storage.Keys, error)) error {
+func (c *conn) UpdateKeys(ctx context.Context, updater func(old storage.Keys) (storage.Keys, error)) error {
 	return c.ExecTx(func(tx *trans) error {
 		firstUpdate := false
 		// TODO(ericchiang): errors may cause a transaction be rolled back by the SQL
@@ -429,7 +429,7 @@ func (c *conn) UpdateKeys(updater func(old storage.Keys) (storage.Keys, error)) 
 	})
 }
 
-func (c *conn) GetKeys() (keys storage.Keys, err error) {
+func (c *conn) GetKeys(ctx context.Context) (keys storage.Keys, err error) {
 	return getKeys(c)
 }
 
@@ -452,7 +452,7 @@ func getKeys(q querier) (keys storage.Keys, err error) {
 	return keys, nil
 }
 
-func (c *conn) UpdateClient(id string, updater func(old storage.Client) (storage.Client, error)) error {
+func (c *conn) UpdateClient(ctx context.Context, id string, updater func(old storage.Client) (storage.Client, error)) error {
 	return c.ExecTx(func(tx *trans) error {
 		cli, err := getClient(tx, id)
 		if err != nil {
@@ -482,7 +482,7 @@ func (c *conn) UpdateClient(id string, updater func(old storage.Client) (storage
 	})
 }
 
-func (c *conn) CreateClient(cli storage.Client) error {
+func (c *conn) CreateClient(ctx context.Context, cli storage.Client) error {
 	_, err := c.Exec(`
 		insert into client (
 			id, secret, redirect_uris, trusted_peers, public, name, logo_url
@@ -509,11 +509,11 @@ func getClient(q querier, id string) (storage.Client, error) {
 	`, id))
 }
 
-func (c *conn) GetClient(id string) (storage.Client, error) {
+func (c *conn) GetClient(ctx context.Context, id string) (storage.Client, error) {
 	return getClient(c, id)
 }
 
-func (c *conn) ListClients() ([]storage.Client, error) {
+func (c *conn) ListClients(ctx context.Context) ([]storage.Client, error) {
 	rows, err := c.Query(`
 		select
 			id, secret, redirect_uris, trusted_peers, public, name, logo_url
@@ -550,7 +550,7 @@ func scanClient(s scanner) (cli storage.Client, err error) {
 	return cli, nil
 }
 
-func (c *conn) CreatePassword(p storage.Password) error {
+func (c *conn) CreatePassword(ctx context.Context, p storage.Password) error {
 	p.Email = strings.ToLower(p.Email)
 	_, err := c.Exec(`
 		insert into password (
@@ -571,7 +571,7 @@ func (c *conn) CreatePassword(p storage.Password) error {
 	return nil
 }
 
-func (c *conn) UpdatePassword(email string, updater func(p storage.Password) (storage.Password, error)) error {
+func (c *conn) UpdatePassword(ctx context.Context, email string, updater func(p storage.Password) (storage.Password, error)) error {
 	return c.ExecTx(func(tx *trans) error {
 		p, err := getPassword(tx, email)
 		if err != nil {
@@ -597,7 +597,7 @@ func (c *conn) UpdatePassword(email string, updater func(p storage.Password) (st
 	})
 }
 
-func (c *conn) GetPassword(email string) (storage.Password, error) {
+func (c *conn) GetPassword(ctx context.Context, email string) (storage.Password, error) {
 	return getPassword(c, email)
 }
 
@@ -609,7 +609,7 @@ func getPassword(q querier, email string) (p storage.Password, err error) {
 	`, strings.ToLower(email)))
 }
 
-func (c *conn) ListPasswords() ([]storage.Password, error) {
+func (c *conn) ListPasswords(ctx context.Context) ([]storage.Password, error) {
 	rows, err := c.Query(`
 		select
 			email, hash, username, user_id
@@ -646,7 +646,7 @@ func scanPassword(s scanner) (p storage.Password, err error) {
 	return p, nil
 }
 
-func (c *conn) CreateOfflineSessions(s storage.OfflineSessions) error {
+func (c *conn) CreateOfflineSessions(ctx context.Context, s storage.OfflineSessions) error {
 	_, err := c.Exec(`
 		insert into offline_session (
 			user_id, conn_id, refresh
@@ -666,7 +666,7 @@ func (c *conn) CreateOfflineSessions(s storage.OfflineSessions) error {
 	return nil
 }
 
-func (c *conn) UpdateOfflineSessions(userID string, connID string, updater func(s storage.OfflineSessions) (storage.OfflineSessions, error)) error {
+func (c *conn) UpdateOfflineSessions(ctx context.Context, userID string, connID string, updater func(s storage.OfflineSessions) (storage.OfflineSessions, error)) error {
 	return c.ExecTx(func(tx *trans) error {
 		s, err := getOfflineSessions(tx, userID, connID)
 		if err != nil {
@@ -692,7 +692,7 @@ func (c *conn) UpdateOfflineSessions(userID string, connID string, updater func(
 	})
 }
 
-func (c *conn) GetOfflineSessions(userID string, connID string) (storage.OfflineSessions, error) {
+func (c *conn) GetOfflineSessions(ctx context.Context, userID string, connID string) (storage.OfflineSessions, error) {
 	return getOfflineSessions(c, userID, connID)
 }
 
@@ -718,7 +718,7 @@ func scanOfflineSessions(s scanner) (o storage.OfflineSessions, err error) {
 	return o, nil
 }
 
-func (c *conn) CreateConnector(connector storage.Connector) error {
+func (c *conn) CreateConnector(ctx context.Context, connector storage.Connector) error {
 	_, err := c.Exec(`
 		insert into connector (
 			id, type, name, resource_version, config
@@ -738,7 +738,7 @@ func (c *conn) CreateConnector(connector storage.Connector) error {
 	return nil
 }
 
-func (c *conn) UpdateConnector(id string, updater func(s storage.Connector) (storage.Connector, error)) error {
+func (c *conn) UpdateConnector(ctx context.Context, id string, updater func(s storage.Connector) (storage.Connector, error)) error {
 	return c.ExecTx(func(tx *trans) error {
 		connector, err := getConnector(tx, id)
 		if err != nil {
@@ -767,7 +767,7 @@ func (c *conn) UpdateConnector(id string, updater func(s storage.Connector) (sto
 	})
 }
 
-func (c *conn) GetConnector(id string) (storage.Connector, error) {
+func (c *conn) GetConnector(ctx context.Context, id string) (storage.Connector, error) {
 	return getConnector(c, id)
 }
 
@@ -793,7 +793,7 @@ func scanConnector(s scanner) (c storage.Connector, err error) {
 	return c, nil
 }
 
-func (c *conn) ListConnectors() ([]storage.Connector, error) {
+func (c *conn) ListConnectors(ctx context.Context) ([]storage.Connector, error) {
 	rows, err := c.Query(`
 		select
 			id, type, name, resource_version, config
@@ -819,15 +819,21 @@ func (c *conn) ListConnectors() ([]storage.Connector, error) {
 func (c *conn) DeleteAuthRequest(ctx context.Context, id string) error {
 	return c.delete("auth_request", "id", id)
 }
-func (c *conn) DeleteAuthCode(id string) error { return c.delete("auth_code", "id", id) }
-func (c *conn) DeleteClient(id string) error   { return c.delete("client", "id", id) }
-func (c *conn) DeleteRefresh(id string) error  { return c.delete("refresh_token", "id", id) }
-func (c *conn) DeletePassword(email string) error {
+func (c *conn) DeleteAuthCode(ctx context.Context, id string) error {
+	return c.delete("auth_code", "id", id)
+}
+func (c *conn) DeleteClient(ctx context.Context, id string) error { return c.delete("client", "id", id) }
+func (c *conn) DeleteRefresh(ctx context.Context, id string) error {
+	return c.delete("refresh_token", "id", id)
+}
+func (c *conn) DeletePassword(ctx context.Context, email string) error {
 	return c.delete("password", "email", strings.ToLower(email))
 }
-func (c *conn) DeleteConnector(id string) error { return c.delete("connector", "id", id) }
+func (c *conn) DeleteConnector(ctx context.Context, id string) error {
+	return c.delete("connector", "id", id)
+}
 
-func (c *conn) DeleteOfflineSessions(userID string, connID string) error {
+func (c *conn) DeleteOfflineSessions(ctx context.Context, userID string, connID string) error {
 	result, err := c.Exec(`delete from offline_session where user_id = $1 AND conn_id = $2`, userID, connID)
 	if err != nil {
 		return fmt.Errorf("delete offline_session: user_id = %s, conn_id = %s", userID, connID)

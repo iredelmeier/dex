@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/net/context"
 	jose "gopkg.in/square/go-jose.v2"
 
 	"github.com/dexidp/dex/connector"
@@ -265,8 +266,8 @@ type federatedIDClaims struct {
 	UserID      string `json:"user_id,omitempty"`
 }
 
-func (s *Server) newIDToken(clientID string, claims storage.Claims, scopes []string, nonce, accessToken, connID string) (idToken string, expiry time.Time, err error) {
-	keys, err := s.storage.GetKeys()
+func (s *Server) newIDToken(ctx context.Context, clientID string, claims storage.Claims, scopes []string, nonce, accessToken, connID string) (idToken string, expiry time.Time, err error) {
+	keys, err := s.storage.GetKeys(ctx)
 	if err != nil {
 		s.logger.Errorf("Failed to get keys: %v", err)
 		return "", expiry, err
@@ -333,7 +334,7 @@ func (s *Server) newIDToken(clientID string, claims storage.Claims, scopes []str
 				// initial auth request.
 				continue
 			}
-			isTrusted, err := s.validateCrossClientTrust(clientID, peerID)
+			isTrusted, err := s.validateCrossClientTrust(ctx, clientID, peerID)
 			if err != nil {
 				return "", expiry, err
 			}
@@ -373,6 +374,7 @@ func (s *Server) newIDToken(clientID string, claims storage.Claims, scopes []str
 
 // parse the initial request from the OAuth2 client.
 func (s *Server) parseAuthorizationRequest(r *http.Request) (req storage.AuthRequest, oauth2Err *authErr) {
+	ctx := r.Context()
 	if err := r.ParseForm(); err != nil {
 		return req, &authErr{"", "", errInvalidRequest, "Failed to parse request body."}
 	}
@@ -389,7 +391,7 @@ func (s *Server) parseAuthorizationRequest(r *http.Request) (req storage.AuthReq
 	scopes := strings.Fields(q.Get("scope"))
 	responseTypes := strings.Fields(q.Get("response_type"))
 
-	client, err := s.storage.GetClient(clientID)
+	client, err := s.storage.GetClient(ctx, clientID)
 	if err != nil {
 		if err == storage.ErrNotFound {
 			description := fmt.Sprintf("Invalid client_id (%q).", clientID)
@@ -426,7 +428,7 @@ func (s *Server) parseAuthorizationRequest(r *http.Request) (req storage.AuthReq
 				continue
 			}
 
-			isTrusted, err := s.validateCrossClientTrust(clientID, peerID)
+			isTrusted, err := s.validateCrossClientTrust(ctx, clientID, peerID)
 			if err != nil {
 				return req, newErr(errServerError, "Internal server error.")
 			}
@@ -513,11 +515,11 @@ func parseCrossClientScope(scope string) (peerID string, ok bool) {
 	return
 }
 
-func (s *Server) validateCrossClientTrust(clientID, peerID string) (trusted bool, err error) {
+func (s *Server) validateCrossClientTrust(ctx context.Context, clientID, peerID string) (trusted bool, err error) {
 	if peerID == clientID {
 		return true, nil
 	}
-	peer, err := s.storage.GetClient(peerID)
+	peer, err := s.storage.GetClient(ctx, peerID)
 	if err != nil {
 		if err != storage.ErrNotFound {
 			s.logger.Errorf("Failed to get client: %v", err)

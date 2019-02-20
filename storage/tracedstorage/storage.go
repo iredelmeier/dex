@@ -4,164 +4,158 @@ import (
 	"context"
 	"time"
 
-	"github.com/dexidp/dex/instrumentation"
 	"github.com/dexidp/dex/storage"
 	opentracing "github.com/opentracing/opentracing-go"
 )
 
-func TraceStorage(parent storage.Storage, c instrumentation.TracerConfig) storage.Storage {
-	tracer := instrumentation.NewTracer(c, "storage")
-	opentracing.SetGlobalTracer(tracer)
-
+func TraceStorage(parent storage.Storage) storage.Storage {
 	return &tracedStorage{
 		parent: parent,
-		tracer: tracer,
 	}
 }
 
 type tracedStorage struct {
 	parent storage.Storage
-	tracer opentracing.Tracer
 }
 
-func (s *tracedStorage) Close() error {
-	span := s.tracer.StartSpan("storage.Close")
+func (s *tracedStorage) Close(ctx context.Context) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.Close")
 	defer span.Finish()
 
-	return s.parent.Close()
+	return s.parent.Close(ctx)
 }
 
-func (s *tracedStorage) CreateAuthRequest(a storage.AuthRequest) error {
-	span := s.tracer.StartSpan("storage.CreateAuthRequest")
+func (s *tracedStorage) CreateAuthRequest(ctx context.Context, a storage.AuthRequest) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.CreateAuthRequest")
 	defer span.Finish()
 
-	return s.parent.CreateAuthRequest(a)
+	return s.parent.CreateAuthRequest(ctx, a)
 }
 
-func (s *tracedStorage) CreateClient(c storage.Client) error {
-	span := s.tracer.StartSpan("storage.CreateClient")
+func (s *tracedStorage) CreateClient(ctx context.Context, c storage.Client) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.CreateClient")
 	defer span.Finish()
 
-	return s.parent.CreateClient(c)
+	return s.parent.CreateClient(ctx, c)
 }
 
-func (s *tracedStorage) CreateAuthCode(c storage.AuthCode) error {
-	span := s.tracer.StartSpan("storage.CreateAuthCode")
+func (s *tracedStorage) CreateAuthCode(ctx context.Context, c storage.AuthCode) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.CreateAuthCode")
 	defer span.Finish()
 
-	return s.parent.CreateAuthCode(c)
+	return s.parent.CreateAuthCode(ctx, c)
 }
 
-func (s *tracedStorage) CreateRefresh(r storage.RefreshToken) error {
-	span := s.tracer.StartSpan("storage.CreateRefresh")
+func (s *tracedStorage) CreateRefresh(ctx context.Context, r storage.RefreshToken) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.CreateRefresh")
 	defer span.Finish()
 
-	return s.parent.CreateRefresh(r)
+	return s.parent.CreateRefresh(ctx, r)
 }
 
-func (s *tracedStorage) CreatePassword(p storage.Password) error {
-	span := s.tracer.StartSpan("storage.CreatePassword")
+func (s *tracedStorage) CreatePassword(ctx context.Context, p storage.Password) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.CreatePassword")
 	defer span.Finish()
 
-	return s.parent.CreatePassword(p)
+	return s.parent.CreatePassword(ctx, p)
 }
 
-func (s *tracedStorage) CreateOfflineSessions(os storage.OfflineSessions) error {
-	span := s.tracer.StartSpan("storage.CreateOfflineSessions")
+func (s *tracedStorage) CreateOfflineSessions(ctx context.Context, os storage.OfflineSessions) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.CreateOfflineSessions")
 	defer span.Finish()
 
-	return s.parent.CreateOfflineSessions(os)
+	return s.parent.CreateOfflineSessions(ctx, os)
 }
 
-func (s *tracedStorage) CreateConnector(c storage.Connector) error {
-	span := s.tracer.StartSpan("storage.CreateConnector")
+func (s *tracedStorage) CreateConnector(ctx context.Context, c storage.Connector) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.CreateConnector")
 	defer span.Finish()
 
-	return s.parent.CreateConnector(c)
+	return s.parent.CreateConnector(ctx, c)
 }
 
-func (s *tracedStorage) GetAuthRequest(id string) (storage.AuthRequest, error) {
-	span := s.tracer.StartSpan("storage.GetAuthRequest")
+func (s *tracedStorage) GetAuthRequest(ctx context.Context, id string) (storage.AuthRequest, error) {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.GetAuthRequest")
 	defer span.Finish()
 
-	return s.parent.GetAuthRequest(id)
+	return s.parent.GetAuthRequest(ctx, id)
 }
 
-func (s *tracedStorage) GetAuthCode(id string) (storage.AuthCode, error) {
-	span := s.tracer.StartSpan("storage.GetAuthCode")
+func (s *tracedStorage) GetAuthCode(ctx context.Context, id string) (storage.AuthCode, error) {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.GetAuthCode")
 	defer span.Finish()
 
-	return s.parent.GetAuthCode(id)
+	return s.parent.GetAuthCode(ctx, id)
 }
 
-func (s *tracedStorage) GetClient(id string) (storage.Client, error) {
-	span := s.tracer.StartSpan("storage.GetClient")
+func (s *tracedStorage) GetClient(ctx context.Context, id string) (storage.Client, error) {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.GetClient")
 	defer span.Finish()
 
-	return s.parent.GetClient(id)
+	return s.parent.GetClient(ctx, id)
 }
 
-func (s *tracedStorage) GetKeys() (storage.Keys, error) {
-	span := s.tracer.StartSpan("storage.GetKeys")
+func (s *tracedStorage) GetKeys(ctx context.Context) (storage.Keys, error) {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.GetKeys")
 	defer span.Finish()
 
-	return s.parent.GetKeys()
+	return s.parent.GetKeys(ctx)
 }
 
-func (s *tracedStorage) GetRefresh(id string) (storage.RefreshToken, error) {
-	span := s.tracer.StartSpan("storage.GetRefresh")
+func (s *tracedStorage) GetRefresh(ctx context.Context, id string) (storage.RefreshToken, error) {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.GetRefresh")
 	defer span.Finish()
 
-	return s.parent.GetRefresh(id)
+	return s.parent.GetRefresh(ctx, id)
 }
 
-func (s *tracedStorage) GetPassword(email string) (storage.Password, error) {
-	span := s.tracer.StartSpan("storage.GetPassword")
+func (s *tracedStorage) GetPassword(ctx context.Context, email string) (storage.Password, error) {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.GetPassword")
 	defer span.Finish()
 
-	return s.parent.GetPassword(email)
+	return s.parent.GetPassword(ctx, email)
 }
 
-func (s *tracedStorage) GetOfflineSessions(userID string, connID string) (storage.OfflineSessions, error) {
-	span := s.tracer.StartSpan("storage.GetOfflineSessions")
+func (s *tracedStorage) GetOfflineSessions(ctx context.Context, userID string, connID string) (storage.OfflineSessions, error) {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.GetOfflineSessions")
 	defer span.Finish()
 
-	return s.parent.GetOfflineSessions(userID, connID)
+	return s.parent.GetOfflineSessions(ctx, userID, connID)
 }
 
-func (s *tracedStorage) GetConnector(id string) (storage.Connector, error) {
-	span := s.tracer.StartSpan("storage.GetConnector")
+func (s *tracedStorage) GetConnector(ctx context.Context, id string) (storage.Connector, error) {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.GetConnector")
 	defer span.Finish()
 
-	return s.parent.GetConnector(id)
+	return s.parent.GetConnector(ctx, id)
 }
 
-func (s *tracedStorage) ListClients() ([]storage.Client, error) {
-	span := s.tracer.StartSpan("storage.ListClients")
+func (s *tracedStorage) ListClients(ctx context.Context) ([]storage.Client, error) {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.ListClients")
 	defer span.Finish()
 
-	return s.parent.ListClients()
+	return s.parent.ListClients(ctx)
 }
 
-func (s *tracedStorage) ListRefreshTokens() ([]storage.RefreshToken, error) {
-	span := s.tracer.StartSpan("storage.ListRefreshTokens")
+func (s *tracedStorage) ListRefreshTokens(ctx context.Context) ([]storage.RefreshToken, error) {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.ListRefreshTokens")
 	defer span.Finish()
 
-	return s.parent.ListRefreshTokens()
+	return s.parent.ListRefreshTokens(ctx)
 }
 
-func (s *tracedStorage) ListPasswords() ([]storage.Password, error) {
-	span := s.tracer.StartSpan("storage.ListPasswords")
+func (s *tracedStorage) ListPasswords(ctx context.Context) ([]storage.Password, error) {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.ListPasswords")
 	defer span.Finish()
 
-	return s.parent.ListPasswords()
+	return s.parent.ListPasswords(ctx)
 }
 
-func (s *tracedStorage) ListConnectors() ([]storage.Connector, error) {
-	span := s.tracer.StartSpan("storage.ListConnectors")
+func (s *tracedStorage) ListConnectors(ctx context.Context) ([]storage.Connector, error) {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.ListConnectors")
 	defer span.Finish()
 
-	return s.parent.ListConnectors()
+	return s.parent.ListConnectors(ctx)
 }
 
 func (s *tracedStorage) DeleteAuthRequest(ctx context.Context, id string) error {
@@ -171,100 +165,100 @@ func (s *tracedStorage) DeleteAuthRequest(ctx context.Context, id string) error 
 	return s.parent.DeleteAuthRequest(ctx, id)
 }
 
-func (s *tracedStorage) DeleteAuthCode(code string) error {
-	span := s.tracer.StartSpan("storage.DeleteAuthCode")
+func (s *tracedStorage) DeleteAuthCode(ctx context.Context, code string) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.DeleteAuthCode")
 	defer span.Finish()
 
-	return s.parent.DeleteAuthCode(code)
+	return s.parent.DeleteAuthCode(ctx, code)
 }
 
-func (s *tracedStorage) DeleteClient(id string) error {
-	span := s.tracer.StartSpan("storage.DeleteClient")
+func (s *tracedStorage) DeleteClient(ctx context.Context, id string) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.DeleteClient")
 	defer span.Finish()
 
-	return s.parent.DeleteClient(id)
+	return s.parent.DeleteClient(ctx, id)
 }
 
-func (s *tracedStorage) DeleteRefresh(id string) error {
-	span := s.tracer.StartSpan("storage.DeleteRefresh")
+func (s *tracedStorage) DeleteRefresh(ctx context.Context, id string) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.DeleteRefresh")
 	defer span.Finish()
 
-	return s.parent.DeleteRefresh(id)
+	return s.parent.DeleteRefresh(ctx, id)
 }
 
-func (s *tracedStorage) DeletePassword(email string) error {
-	span := s.tracer.StartSpan("storage.DeletePassword")
+func (s *tracedStorage) DeletePassword(ctx context.Context, email string) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.DeletePassword")
 	defer span.Finish()
 
-	return s.parent.DeletePassword(email)
+	return s.parent.DeletePassword(ctx, email)
 }
 
-func (s *tracedStorage) DeleteOfflineSessions(userID string, connID string) error {
-	span := s.tracer.StartSpan("storage.DeleteOfflineSessions")
+func (s *tracedStorage) DeleteOfflineSessions(ctx context.Context, userID string, connID string) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.DeleteOfflineSessions")
 	defer span.Finish()
 
-	return s.parent.DeleteOfflineSessions(userID, connID)
+	return s.parent.DeleteOfflineSessions(ctx, userID, connID)
 }
 
-func (s *tracedStorage) DeleteConnector(id string) error {
-	span := s.tracer.StartSpan("storage.DeleteConnector")
+func (s *tracedStorage) DeleteConnector(ctx context.Context, id string) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.DeleteConnector")
 	defer span.Finish()
 
-	return s.parent.DeleteConnector(id)
+	return s.parent.DeleteConnector(ctx, id)
 }
 
-func (s *tracedStorage) UpdateClient(id string, updater func(storage.Client) (storage.Client, error)) error {
-	span := s.tracer.StartSpan("storage.UpdateClient")
+func (s *tracedStorage) UpdateClient(ctx context.Context, id string, updater func(storage.Client) (storage.Client, error)) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.UpdateClient")
 	defer span.Finish()
 
-	return s.parent.UpdateClient(id, updater)
+	return s.parent.UpdateClient(ctx, id, updater)
 }
 
-func (s *tracedStorage) UpdateKeys(updater func(storage.Keys) (storage.Keys, error)) error {
-	span := s.tracer.StartSpan("storage.UpdateKeys")
+func (s *tracedStorage) UpdateKeys(ctx context.Context, updater func(storage.Keys) (storage.Keys, error)) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.UpdateKeys")
 	defer span.Finish()
 
-	return s.parent.UpdateKeys(updater)
+	return s.parent.UpdateKeys(ctx, updater)
 }
 
-func (s *tracedStorage) UpdateAuthRequest(id string, updater func(storage.AuthRequest) (storage.AuthRequest, error)) error {
-	span := s.tracer.StartSpan("storage.UpdateAuthRequest")
+func (s *tracedStorage) UpdateAuthRequest(ctx context.Context, id string, updater func(storage.AuthRequest) (storage.AuthRequest, error)) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.UpdateAuthRequest")
 	defer span.Finish()
 
-	return s.parent.UpdateAuthRequest(id, updater)
+	return s.parent.UpdateAuthRequest(ctx, id, updater)
 }
 
-func (s *tracedStorage) UpdateRefreshToken(id string, updater func(storage.RefreshToken) (storage.RefreshToken, error)) error {
-	span := s.tracer.StartSpan("storage.UpdateRefreshToken")
+func (s *tracedStorage) UpdateRefreshToken(ctx context.Context, id string, updater func(storage.RefreshToken) (storage.RefreshToken, error)) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.UpdateRefreshToken")
 	defer span.Finish()
 
-	return s.parent.UpdateRefreshToken(id, updater)
+	return s.parent.UpdateRefreshToken(ctx, id, updater)
 }
 
-func (s *tracedStorage) UpdatePassword(email string, updater func(storage.Password) (storage.Password, error)) error {
-	span := s.tracer.StartSpan("storage.UpdatePassword")
+func (s *tracedStorage) UpdatePassword(ctx context.Context, email string, updater func(storage.Password) (storage.Password, error)) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.UpdatePassword")
 	defer span.Finish()
 
-	return s.parent.UpdatePassword(email, updater)
+	return s.parent.UpdatePassword(ctx, email, updater)
 }
 
-func (s *tracedStorage) UpdateOfflineSessions(userID string, connID string, updater func(storage.OfflineSessions) (storage.OfflineSessions, error)) error {
-	span := s.tracer.StartSpan("storage.UpdateOfflineSessions")
+func (s *tracedStorage) UpdateOfflineSessions(ctx context.Context, userID string, connID string, updater func(storage.OfflineSessions) (storage.OfflineSessions, error)) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.UpdateOfflineSessions")
 	defer span.Finish()
 
-	return s.parent.UpdateOfflineSessions(userID, connID, updater)
+	return s.parent.UpdateOfflineSessions(ctx, userID, connID, updater)
 }
 
-func (s *tracedStorage) UpdateConnector(id string, updater func(storage.Connector) (storage.Connector, error)) error {
-	span := s.tracer.StartSpan("storage.UpdateConnector")
+func (s *tracedStorage) UpdateConnector(ctx context.Context, id string, updater func(storage.Connector) (storage.Connector, error)) error {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.UpdateConnector")
 	defer span.Finish()
 
-	return s.parent.UpdateConnector(id, updater)
+	return s.parent.UpdateConnector(ctx, id, updater)
 }
 
-func (s *tracedStorage) GarbageCollect(now time.Time) (storage.GCResult, error) {
-	span := s.tracer.StartSpan("storage.GarbageCollect")
+func (s *tracedStorage) GarbageCollect(ctx context.Context, now time.Time) (storage.GCResult, error) {
+	span, _ := opentracing.StartSpanFromContext(ctx, "storage.GarbageCollect")
 	defer span.Finish()
 
-	return s.parent.GarbageCollect(now)
+	return s.parent.GarbageCollect(ctx, now)
 }
