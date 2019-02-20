@@ -31,6 +31,9 @@ require (
 	github.com/lib/pq v0.0.0-20181016162627-9eb73efc1fcc
 	github.com/mattn/go-sqlite3 v0.0.0-20160907162043-3fb7a0e792ed
 	github.com/matttproud/golang_protobuf_extensions v0.0.0-20150406173934-fc2b8d3a73c4 // indirect
+	github.com/opentracing-contrib/go-gorilla v0.0.0-20190110000444-ced666783644
+	github.com/opentracing-contrib/go-stdlib v0.0.0-20190205184154-464eb271c715 // indirect
+	github.com/opentracing/opentracing-go v1.0.2
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/pquerna/cachecontrol v0.0.0-20160421231612-c97913dcbd76 // indirect
 	github.com/prometheus/client_golang v0.9.0-pre1

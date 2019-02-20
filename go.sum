@@ -61,6 +61,12 @@ github.com/mattn/go-sqlite3 v0.0.0-20160907162043-3fb7a0e792ed h1:hhFE3aQaQI9KqF
 github.com/mattn/go-sqlite3 v0.0.0-20160907162043-3fb7a0e792ed/go.mod h1:FPy6KqzDD04eiIsT53CuJW3U88zkxoIYsOqkbpncsNc=
 github.com/matttproud/golang_protobuf_extensions v0.0.0-20150406173934-fc2b8d3a73c4 h1:NlK6WXPDxjVVwseTuj5NdNJBDabnoJryx4UqB5i/Lk8=
 github.com/matttproud/golang_protobuf_extensions v0.0.0-20150406173934-fc2b8d3a73c4/go.mod h1:D8He9yQNgCq6Z5Ld7szi9bcBfOoFv/3dc6xSMkL2PC0=
+github.com/opentracing-contrib/go-gorilla v0.0.0-20190110000444-ced666783644 h1:dbnugNaH2wyQcijsw7+Px7JAWtOP8Z4QkB/4pY/nOJM=
+github.com/opentracing-contrib/go-gorilla v0.0.0-20190110000444-ced666783644/go.mod h1:JcJTH6nsplW7FqrfVQW7XCWVSzOrxrgfMNYAoMBmHX0=
+github.com/opentracing-contrib/go-stdlib v0.0.0-20190205184154-464eb271c715 h1:KlumVvQYKfpt/2dqQnvjh9tsaMEl0vZEgLio8lGQfMA=
+github.com/opentracing-contrib/go-stdlib v0.0.0-20190205184154-464eb271c715/go.mod h1:PLldrQSroqzH70Xl+1DQcGnefIbqsKR7UDaiux3zV+w=
+github.com/opentracing/opentracing-go v1.0.2 h1:3jA2P6O1F9UOrWVpwrIo17pu01KWvNWg4X946/Y5Zwg=
+github.com/opentracing/opentracing-go v1.0.2/go.mod h1:UkNAQd3GIcIGf0SeVgPpRdFStlNbqXla1AfSYxPUl2o=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/pquerna/cachecontrol v0.0.0-20160421231612-c97913dcbd76 h1:O60OlfVScwx/OixpMy8gIPeKNIN3bI9BrOuTIUexlbc=

@@ -19,6 +19,8 @@ import (
 	"github.com/felixge/httpsnoop"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
+	"github.com/opentracing-contrib/go-gorilla/gorilla"
+	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 
@@ -81,6 +83,7 @@ type Config struct {
 	Web WebConfig
 
 	Logger logrus.FieldLogger
+	Tracer opentracing.Tracer
 
 	PrometheusRegistry *prometheus.Registry
 }
@@ -290,6 +293,12 @@ func newServer(ctx context.Context, c Config, rotationStrategy rotationStrategy)
 	handle("/healthz", s.newHealthChecker(ctx))
 	handlePrefix("/static", static)
 	handlePrefix("/theme", theme)
+
+	_ = r.Walk(func(route *mux.Route, router *mux.Router, ancestors []*mux.Route) error {
+		route.Handler(gorilla.Middleware(c.Tracer, route.GetHandler()))
+		return nil
+	})
+
 	s.mux = r
 
 	s.startKeyRotation(ctx, rotationStrategy, now)

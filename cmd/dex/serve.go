@@ -23,6 +23,7 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	"github.com/dexidp/dex/api"
+	"github.com/dexidp/dex/instrumentation"
 	"github.com/dexidp/dex/server"
 	"github.com/dexidp/dex/storage"
 )
@@ -70,6 +71,7 @@ func serve(cmd *cobra.Command, args []string) error {
 	if c.Logger.Level != "" {
 		logger.Infof("config using log level: %s", c.Logger.Level)
 	}
+	tracer := instrumentation.NewTracer()
 
 	// Fast checks. Perform these first for a more responsive CLI.
 	checks := []struct {
@@ -223,6 +225,7 @@ func serve(cmd *cobra.Command, args []string) error {
 		Storage:                s,
 		Web:                    c.Frontend,
 		Logger:                 logger,
+		Tracer:                 tracer,
 		Now:                    now,
 		PrometheusRegistry:     prometheusRegistry,
 	}
