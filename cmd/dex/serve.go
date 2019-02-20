@@ -26,6 +26,7 @@ import (
 	"github.com/dexidp/dex/instrumentation"
 	"github.com/dexidp/dex/server"
 	"github.com/dexidp/dex/storage"
+	"github.com/dexidp/dex/storage/tracedstorage"
 )
 
 func commandServe() *cobra.Command {
@@ -159,6 +160,8 @@ func serve(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to initialize storage: %v", err)
 	}
 	logger.Infof("config storage: %s", c.Storage.Type)
+
+	s = tracedstorage.TraceStorage(s, c.Tracer)
 
 	if len(c.StaticClients) > 0 {
 		for _, client := range c.StaticClients {
