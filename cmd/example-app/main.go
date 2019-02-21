@@ -18,7 +18,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/coreos/go-oidc"
+	oidc "github.com/coreos/go-oidc"
+	"github.com/dexidp/dex/instrumentation"
+	lightstep "github.com/lightstep/lightstep-tracer-go"
+	"github.com/opentracing-contrib/go-stdlib/nethttp"
+	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/spf13/cobra"
 	"golang.org/x/oauth2"
 )
@@ -139,6 +143,9 @@ func cmd() *cobra.Command {
 				a.client = http.DefaultClient
 			}
 
+			parentTransport := a.client.Transport
+			a.client.Transport = &nethttp.Transport{RoundTripper: parentTransport}
+
 			// TODO(ericchiang): Retry with backoff
 			ctx := oidc.ClientContext(context.Background(), a.client)
 			provider, err := oidc.NewProvider(ctx, issuerURL)
@@ -176,17 +183,34 @@ func cmd() *cobra.Command {
 			a.provider = provider
 			a.verifier = provider.Verifier(&oidc.Config{ClientID: a.clientID})
 
-			http.HandleFunc("/", a.handleIndex)
-			http.HandleFunc("/login", a.handleLogin)
-			http.HandleFunc(u.Path, a.handleCallback)
+			mux := http.NewServeMux()
+			mux.HandleFunc("/", a.handleIndex)
+			mux.HandleFunc("/login", a.handleLogin)
+			mux.HandleFunc(u.Path, a.handleCallback)
+
+			tracerConfig := instrumentation.TracerConfig{
+				LightStep: &lightstep.Options{
+					AccessToken: os.Getenv("TRACER_ACCESS_TOKEN"),
+					Collector: lightstep.Endpoint{
+						Host: os.Getenv("LIGHTSTEP_COLLECTOR_HOST"),
+					},
+				},
+			}
+
+			opentracing.SetGlobalTracer(instrumentation.NewTracer(tracerConfig, "server"))
+
+			server := &http.Server{
+				Addr:    listenURL.Host,
+				Handler: nethttp.Middleware(opentracing.GlobalTracer(), mux),
+			}
 
 			switch listenURL.Scheme {
 			case "http":
 				log.Printf("listening on %s", listen)
-				return http.ListenAndServe(listenURL.Host, nil)
+				return server.ListenAndServe()
 			case "https":
 				log.Printf("listening on %s", listen)
-				return http.ListenAndServeTLS(listenURL.Host, tlsCert, tlsKey, nil)
+				return server.ListenAndServeTLS(tlsCert, tlsKey)
 			default:
 				return fmt.Errorf("listen address %q is not using http or https", listen)
 			}
@@ -212,6 +236,9 @@ func main() {
 }
 
 func (a *app) handleIndex(w http.ResponseWriter, r *http.Request) {
+	_, ht := nethttp.TraceRequest(opentracing.GlobalTracer(), r)
+	defer ht.Finish()
+
 	renderIndex(w)
 }
 
@@ -226,6 +253,9 @@ func (a *app) oauth2Config(scopes []string) *oauth2.Config {
 }
 
 func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
+	r, ht := nethttp.TraceRequest(opentracing.GlobalTracer(), r)
+	defer ht.Finish()
+
 	var scopes []string
 	if extraScopes := r.FormValue("extra_scopes"); extraScopes != "" {
 		scopes = strings.Split(extraScopes, " ")
@@ -253,6 +283,9 @@ func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleCallback(w http.ResponseWriter, r *http.Request) {
+	r, ht := nethttp.TraceRequest(opentracing.GlobalTracer(), r)
+	defer ht.Finish()
+
 	var (
 		err   error
 		token *oauth2.Token
