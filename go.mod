@@ -22,7 +22,7 @@ require (
 	github.com/onsi/ginkgo v1.8.0 // indirect
 	github.com/onsi/gomega v1.5.0 // indirect
 	github.com/pkg/errors v0.9.1
-	github.com/prometheus/client_golang v1.5.1
+	github.com/prometheus/client_golang v1.10.0
 	github.com/russellhaering/goxmldsig v1.1.0
 	github.com/sirupsen/logrus v1.8.1
 	github.com/spf13/cobra v1.1.3
@@ -32,7 +32,6 @@ require (
 	golang.org/x/crypto v0.0.0-20201221181555-eec23a3978ad
 	golang.org/x/net v0.0.0-20201224014010-6772e930b67b
 	golang.org/x/oauth2 v0.0.0-20201208152858-08078c50e5b5
-	golang.org/x/sys v0.0.0-20201201145000-ef89a241ccb3 // indirect
 	google.golang.org/api v0.35.0
 	google.golang.org/grpc v1.32.0
 	google.golang.org/protobuf v1.26.0
