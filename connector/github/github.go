@@ -3,17 +3,16 @@ package github
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
-	"net"
+	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -21,7 +20,7 @@ import (
 
 	"github.com/dexidp/dex/connector"
 	groups_pkg "github.com/dexidp/dex/pkg/groups"
-	"github.com/dexidp/dex/pkg/log"
+	"github.com/dexidp/dex/pkg/httpclient"
 )
 
 const (
@@ -31,6 +30,8 @@ const (
 	// GitHub requires this scope to access '/user/teams' and '/orgs' API endpoints
 	// which are used when a client includes the 'groups' scope.
 	scopeOrgs = "read:org"
+	// githubAPIVersion pins the GitHub REST API version used in requests.
+	githubAPIVersion = "2022-11-28"
 )
 
 // Pagination URL patterns
@@ -42,16 +43,17 @@ var (
 
 // Config holds configuration options for github logins.
 type Config struct {
-	ClientID      string `json:"clientID"`
-	ClientSecret  string `json:"clientSecret"`
-	RedirectURI   string `json:"redirectURI"`
-	Org           string `json:"org"`
-	Orgs          []Org  `json:"orgs"`
-	HostName      string `json:"hostName"`
-	RootCA        string `json:"rootCA"`
-	TeamNameField string `json:"teamNameField"`
-	LoadAllGroups bool   `json:"loadAllGroups"`
-	UseLoginAsID  bool   `json:"useLoginAsID"`
+	ClientID             string `json:"clientID"`
+	ClientSecret         string `json:"clientSecret"`
+	RedirectURI          string `json:"redirectURI"`
+	Org                  string `json:"org"`
+	Orgs                 []Org  `json:"orgs"`
+	HostName             string `json:"hostName"`
+	RootCA               string `json:"rootCA"`
+	TeamNameField        string `json:"teamNameField"`
+	LoadAllGroups        bool   `json:"loadAllGroups"`
+	UseLoginAsID         bool   `json:"useLoginAsID"`
+	PreferredEmailDomain string `json:"preferredEmailDomain"`
 }
 
 // Org holds org-team filters, in which teams are optional.
@@ -68,7 +70,7 @@ type Org struct {
 }
 
 // Open returns a strategy for logging in through GitHub.
-func (c *Config) Open(id string, logger log.Logger) (connector.Connector, error) {
+func (c *Config) Open(id string, logger *slog.Logger) (connector.Connector, error) {
 	if c.Org != "" {
 		// Return error if both 'org' and 'orgs' fields are used.
 		if len(c.Orgs) > 0 {
@@ -78,14 +80,15 @@ func (c *Config) Open(id string, logger log.Logger) (connector.Connector, error)
 	}
 
 	g := githubConnector{
-		redirectURI:  c.RedirectURI,
-		org:          c.Org,
-		orgs:         c.Orgs,
-		clientID:     c.ClientID,
-		clientSecret: c.ClientSecret,
-		apiURL:       apiURL,
-		logger:       logger,
-		useLoginAsID: c.UseLoginAsID,
+		redirectURI:          c.RedirectURI,
+		org:                  c.Org,
+		orgs:                 c.Orgs,
+		clientID:             c.ClientID,
+		clientSecret:         c.ClientSecret,
+		apiURL:               apiURL,
+		logger:               logger.With(slog.Group("connector", "type", "github", "id", id)),
+		useLoginAsID:         c.UseLoginAsID,
+		preferredEmailDomain: c.PreferredEmailDomain,
 	}
 
 	if c.HostName != "" {
@@ -105,7 +108,7 @@ func (c *Config) Open(id string, logger log.Logger) (connector.Connector, error)
 		g.rootCA = c.RootCA
 
 		var err error
-		if g.httpClient, err = newHTTPClient(g.rootCA); err != nil {
+		if g.httpClient, err = httpclient.NewHTTPClient([]string{g.rootCA}, false); err != nil {
 			return nil, fmt.Errorf("failed to create HTTP client: %v", err)
 		}
 	}
@@ -118,12 +121,21 @@ func (c *Config) Open(id string, logger log.Logger) (connector.Connector, error)
 		return nil, fmt.Errorf("invalid connector config: unsupported team name field value `%s`", c.TeamNameField)
 	}
 
+	if c.PreferredEmailDomain != "" {
+		if strings.HasSuffix(c.PreferredEmailDomain, "*") {
+			return nil, errors.New("invalid PreferredEmailDomain: glob pattern cannot end with \"*\"")
+		}
+	}
+
 	return &g, nil
 }
 
 type connectorData struct {
-	// GitHub's OAuth2 tokens never expire. We don't need a refresh token.
-	AccessToken string `json:"accessToken"`
+	// GitHub OAuth Apps return long-lived access tokens. GitHub Apps can return
+	// expiring user access tokens with refresh tokens.
+	AccessToken  string    `json:"accessToken"`
+	RefreshToken string    `json:"refreshToken,omitempty"`
+	Expiry       time.Time `json:"expiry,omitempty"`
 }
 
 var (
@@ -137,7 +149,7 @@ type githubConnector struct {
 	orgs         []Org
 	clientID     string
 	clientSecret string
-	logger       log.Logger
+	logger       *slog.Logger
 	// apiURL defaults to "https://api.github.com"
 	apiURL string
 	// hostName of the GitHub enterprise account.
@@ -152,6 +164,8 @@ type githubConnector struct {
 	loadAllGroups bool
 	// if set to true will use the user's handle rather than their numeric id as the ID
 	useLoginAsID bool
+	// the domain to be preferred among the user's emails. e.g. "github.com"
+	preferredEmailDomain string
 }
 
 // groupsRequired returns whether dex requires GitHub's 'read:org' scope. Dex
@@ -187,12 +201,12 @@ func (c *githubConnector) oauth2Config(scopes connector.Scopes) *oauth2.Config {
 	}
 }
 
-func (c *githubConnector) LoginURL(scopes connector.Scopes, callbackURL, state string) (string, error) {
+func (c *githubConnector) LoginURL(scopes connector.Scopes, callbackURL, state string) (string, []byte, error) {
 	if c.redirectURI != callbackURL {
-		return "", fmt.Errorf("expected callback URL %q did not match the URL in the config %q", callbackURL, c.redirectURI)
+		return "", nil, fmt.Errorf("expected callback URL %q did not match the URL in the config %q", callbackURL, c.redirectURI)
 	}
 
-	return c.oauth2Config(scopes).AuthCodeURL(state), nil
+	return c.oauth2Config(scopes).AuthCodeURL(state), nil, nil
 }
 
 type oauth2Error struct {
@@ -207,35 +221,7 @@ func (e *oauth2Error) Error() string {
 	return e.error + ": " + e.errorDescription
 }
 
-// newHTTPClient returns a new HTTP client that trusts the custom declared rootCA cert.
-func newHTTPClient(rootCA string) (*http.Client, error) {
-	tlsConfig := tls.Config{RootCAs: x509.NewCertPool()}
-	rootCABytes, err := ioutil.ReadFile(rootCA)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read root-ca: %v", err)
-	}
-	if !tlsConfig.RootCAs.AppendCertsFromPEM(rootCABytes) {
-		return nil, fmt.Errorf("no certs found in root CA file %q", rootCA)
-	}
-
-	return &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tlsConfig,
-			Proxy:           http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-				DualStack: true,
-			}).DialContext,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		},
-	}, nil
-}
-
-func (c *githubConnector) HandleCallback(s connector.Scopes, r *http.Request) (identity connector.Identity, err error) {
+func (c *githubConnector) HandleCallback(s connector.Scopes, connData []byte, r *http.Request) (identity connector.Identity, err error) {
 	q := r.URL.Query()
 	if errType := q.Get("error"); errType != "" {
 		return identity, &oauth2Error{errType, q.Get("error_description")}
@@ -287,7 +273,14 @@ func (c *githubConnector) HandleCallback(s connector.Scopes, r *http.Request) (i
 	}
 
 	if s.OfflineAccess {
-		data := connectorData{AccessToken: token.AccessToken}
+		data := connectorData{
+			AccessToken:  token.AccessToken,
+			RefreshToken: token.RefreshToken,
+			Expiry:       token.Expiry,
+		}
+		if token.RefreshToken != "" && c.logger != nil {
+			c.logger.DebugContext(ctx, "github: received upstream refresh token", "access_token_expiry", token.Expiry)
+		}
 		connData, err := json.Marshal(data)
 		if err != nil {
 			return identity, fmt.Errorf("marshal connector data: %v", err)
@@ -296,6 +289,34 @@ func (c *githubConnector) HandleCallback(s connector.Scopes, r *http.Request) (i
 	}
 
 	return identity, nil
+}
+
+// Refreshing tokens
+// https://github.com/golang/oauth2/issues/84#issuecomment-332860871
+type tokenNotifyFunc func(*oauth2.Token) error
+
+// notifyRefreshTokenSource is essentially `oauth2.ReuseTokenSource` with `TokenNotifyFunc` added.
+type notifyRefreshTokenSource struct {
+	new oauth2.TokenSource
+	mu  sync.Mutex // guards t
+	t   *oauth2.Token
+	f   tokenNotifyFunc // called when token refreshed so new refresh token can be persisted
+}
+
+// Token returns the current token if it's still valid, else will
+// refresh the current token and return the new one.
+func (s *notifyRefreshTokenSource) Token() (*oauth2.Token, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.t.Valid() {
+		return s.t, nil
+	}
+	t, err := s.new.Token()
+	if err != nil {
+		return nil, err
+	}
+	s.t = t
+	return t, s.f(t)
 }
 
 func (c *githubConnector) Refresh(ctx context.Context, s connector.Scopes, identity connector.Identity) (connector.Identity, error) {
@@ -308,10 +329,55 @@ func (c *githubConnector) Refresh(ctx context.Context, s connector.Scopes, ident
 		return identity, fmt.Errorf("github: unmarshal access token: %v", err)
 	}
 
-	client := c.oauth2Config(s).Client(ctx, &oauth2.Token{AccessToken: data.AccessToken})
+	if data.AccessToken == "" && data.RefreshToken == "" {
+		return identity, errors.New("no upstream access token found")
+	}
+
+	oauth2Config := c.oauth2Config(s)
+	if c.httpClient != nil {
+		ctx = context.WithValue(ctx, oauth2.HTTPClient, c.httpClient)
+	}
+
+	tok := &oauth2.Token{
+		AccessToken:  data.AccessToken,
+		RefreshToken: data.RefreshToken,
+		Expiry:       data.Expiry,
+	}
+	oldRefreshToken := data.RefreshToken
+	if oldRefreshToken != "" && c.logger != nil {
+		c.logger.DebugContext(ctx, "github: upstream refresh token available",
+			"will_refresh_access_token", !tok.Valid(),
+			"access_token_expiry", data.Expiry,
+		)
+	}
+
+	client := oauth2.NewClient(ctx, &notifyRefreshTokenSource{
+		new: oauth2Config.TokenSource(ctx, tok),
+		t:   tok,
+		f: func(tok *oauth2.Token) error {
+			if c.logger != nil {
+				c.logger.DebugContext(ctx, "github: refreshed upstream access token with refresh token",
+					"access_token_expiry", tok.Expiry,
+					"refresh_token_rotated", oldRefreshToken != "" && tok.RefreshToken != "" && tok.RefreshToken != oldRefreshToken,
+				)
+			}
+
+			data := connectorData{
+				AccessToken:  tok.AccessToken,
+				RefreshToken: tok.RefreshToken,
+				Expiry:       tok.Expiry,
+			}
+			connData, err := json.Marshal(data)
+			if err != nil {
+				return fmt.Errorf("github: marshal connector data: %v", err)
+			}
+			identity.ConnectorData = connData
+			return nil
+		},
+	})
 	user, err := c.user(ctx, client)
 	if err != nil {
-		return identity, fmt.Errorf("github: get user: %v", err)
+		return identity, fmt.Errorf("github: get user: %w", err)
 	}
 
 	username := user.Name
@@ -355,9 +421,11 @@ func formatTeamName(org string, team string) string {
 
 // groupsForOrgs enforces org and team constraints on user authorization
 // Cases in which user is authorized:
-// 	N orgs, no teams: user is member of at least 1 org
-// 	N orgs, M teams per org: user is member of any team from at least 1 org
-// 	N-1 orgs, M teams per org, 1 org with no teams: user is member of any team
+//
+//	N orgs, no teams: user is member of at least 1 org
+//	N orgs, M teams per org: user is member of any team from at least 1 org
+//	N-1 orgs, M teams per org, 1 org with no teams: user is member of any team
+//
 // from at least 1 org, or member of org with no teams
 func (c *githubConnector) groupsForOrgs(ctx context.Context, client *http.Client, userName string) ([]string, error) {
 	groups := make([]string, 0)
@@ -381,7 +449,7 @@ func (c *githubConnector) groupsForOrgs(ctx context.Context, client *http.Client
 		if len(org.Teams) == 0 {
 			inOrgNoTeams = true
 		} else if teams = groups_pkg.Filter(teams, org.Teams); len(teams) == 0 {
-			c.logger.Infof("github: user %q in org %q but no teams", userName, org.Name)
+			c.logger.Info("user in org but no teams", "user", userName, "org", org.Name)
 		}
 
 		for _, teamName := range teams {
@@ -481,14 +549,15 @@ func get(ctx context.Context, client *http.Client, apiURL string, v interface{})
 		return "", fmt.Errorf("github: new req: %v", err)
 	}
 	req = req.WithContext(ctx)
+	req.Header.Set("X-GitHub-Api-Version", githubAPIVersion)
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("github: get URL %v", err)
+		return "", fmt.Errorf("github: get URL %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return "", fmt.Errorf("github: read body: %v", err)
 		}
@@ -550,9 +619,10 @@ func (c *githubConnector) user(ctx context.Context, client *http.Client) (user, 
 		return u, err
 	}
 
-	// Only public user emails are returned by 'GET /user'. u.Email will be empty
-	// if a users' email is private. We must retrieve private emails explicitly.
-	if u.Email == "" {
+	// Only public user emails are returned by 'GET /user'.
+	// If a user has no public email, we must retrieve private emails explicitly.
+	// If preferredEmailDomain is set, we always need to retrieve all emails.
+	if u.Email == "" || c.preferredEmailDomain != "" {
 		var err error
 		if u.Email, err = c.userEmail(ctx, client); err != nil {
 			return u, err
@@ -577,7 +647,13 @@ type userEmail struct {
 // The HTTP client is expected to be constructed by the golang.org/x/oauth2 package,
 // which inserts a bearer token as part of the request.
 func (c *githubConnector) userEmail(ctx context.Context, client *http.Client) (string, error) {
+	var (
+		primaryEmail    userEmail
+		preferredEmails []userEmail
+	)
+
 	apiURL := c.apiURL + "/user/emails"
+
 	for {
 		// https://developer.github.com/v3/users/emails/#list-email-addresses-for-a-user
 		var (
@@ -604,7 +680,17 @@ func (c *githubConnector) userEmail(ctx context.Context, client *http.Client) (s
 			}
 
 			if email.Verified && email.Primary {
-				return email.Email, nil
+				primaryEmail = email
+			}
+
+			if c.preferredEmailDomain != "" {
+				_, domainPart, ok := strings.Cut(email.Email, "@")
+				if !ok {
+					return "", errors.New("github: invalid format email is detected")
+				}
+				if email.Verified && c.isPreferredEmailDomain(domainPart) {
+					preferredEmails = append(preferredEmails, email)
+				}
 			}
 		}
 
@@ -613,7 +699,36 @@ func (c *githubConnector) userEmail(ctx context.Context, client *http.Client) (s
 		}
 	}
 
-	return "", errors.New("github: user has no verified, primary email")
+	if len(preferredEmails) > 0 {
+		return preferredEmails[0].Email, nil
+	}
+
+	if primaryEmail.Email != "" {
+		return primaryEmail.Email, nil
+	}
+
+	return "", errors.New("github: user has no verified, primary email or preferred-domain email")
+}
+
+// isPreferredEmailDomain checks the domain is matching with preferredEmailDomain.
+func (c *githubConnector) isPreferredEmailDomain(domain string) bool {
+	if domain == c.preferredEmailDomain {
+		return true
+	}
+
+	preferredDomainParts := strings.Split(c.preferredEmailDomain, ".")
+	domainParts := strings.Split(domain, ".")
+
+	if len(preferredDomainParts) != len(domainParts) {
+		return false
+	}
+
+	for i, v := range preferredDomainParts {
+		if domainParts[i] != v && v != "*" {
+			return false
+		}
+	}
+	return true
 }
 
 // userInOrg queries the GitHub API for a users' org membership.
@@ -632,6 +747,7 @@ func (c *githubConnector) userInOrg(ctx context.Context, client *http.Client, us
 		return false, fmt.Errorf("github: new req: %v", err)
 	}
 	req = req.WithContext(ctx)
+	req.Header.Set("X-GitHub-Api-Version", githubAPIVersion)
 	resp, err := client.Do(req)
 	if err != nil {
 		return false, fmt.Errorf("github: get teams: %v", err)
@@ -641,7 +757,7 @@ func (c *githubConnector) userInOrg(ctx context.Context, client *http.Client, us
 	switch resp.StatusCode {
 	case http.StatusNoContent:
 	case http.StatusFound, http.StatusNotFound:
-		c.logger.Infof("github: user %q not in org %q or application not authorized to read org data", userName, orgName)
+		c.logger.Info("user not in org or application not authorized to read org data", "user", userName, "org", orgName)
 	default:
 		err = fmt.Errorf("github: unexpected return status: %q", resp.Status)
 	}
@@ -668,8 +784,8 @@ type org struct {
 // which inserts a bearer token as part of the request.
 func (c *githubConnector) teamsForOrg(ctx context.Context, client *http.Client, orgName string) ([]string, error) {
 	apiURL, groups := c.apiURL+"/user/teams", []string{}
+	warnedCaseMismatch := false
 	for {
-		// https://developer.github.com/v3/orgs/teams/#list-user-teams
 		var (
 			teams []team
 			err   error
@@ -679,7 +795,18 @@ func (c *githubConnector) teamsForOrg(ctx context.Context, client *http.Client, 
 		}
 
 		for _, t := range teams {
-			if t.Org.Login == orgName {
+			// GitHub org names are case-insensitive. Groups are built from the name in the
+			// config, so warn if it differs from the canonical login returned by the API.
+			// https://docs.github.com/en/rest/teams/teams?apiVersion=2026-03-10#list-teams-for-the-authenticated-user
+			if strings.EqualFold(t.Org.Login, orgName) {
+				if !warnedCaseMismatch && t.Org.Login != orgName {
+					c.logger.Warn(
+						"org name in config differs in case from GitHub; use the canonical name to keep group claims consistent",
+						"org", orgName,
+						"canonical", t.Org.Login,
+					)
+					warnedCaseMismatch = true
+				}
 				groups = append(groups, c.teamGroupClaims(t)...)
 			}
 		}

@@ -1,3 +1,4 @@
+//go:build cgo
 // +build cgo
 
 package sql
@@ -7,5 +8,5 @@ import (
 )
 
 func TestSQLite3(t *testing.T) {
-	testDB(t, &SQLite3{":memory:"}, false)
+	testDB(t, &SQLite3{":memory:"}, false, true)
 }

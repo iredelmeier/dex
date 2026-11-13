@@ -5,8 +5,9 @@ import (
 	"crypto/x509"
 	"database/sql"
 	"fmt"
-	"io/ioutil"
+	"log/slog"
 	"net"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -15,7 +16,6 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"github.com/lib/pq"
 
-	"github.com/dexidp/dex/pkg/log"
 	"github.com/dexidp/dex/storage"
 )
 
@@ -31,7 +31,6 @@ const (
 	mysqlErrUnknownSysVar       = 1193
 )
 
-// nolint
 const (
 	// postgres SSL modes
 	pgSSLDisable    = "disable"
@@ -40,7 +39,6 @@ const (
 	pgSSLVerifyFull = "verify-full"
 )
 
-// nolint
 const (
 	// MySQL SSL modes
 	mysqlSSLTrue       = "true"
@@ -80,11 +78,11 @@ type SSL struct {
 type Postgres struct {
 	NetworkDB
 
-	SSL SSL `json:"ssl" yaml:"ssl"`
+	SSL SSL `json:"ssl"`
 }
 
 // Open creates a new storage implementation backed by Postgres.
-func (p *Postgres) Open(logger log.Logger) (storage.Storage, error) {
+func (p *Postgres) Open(logger *slog.Logger) (storage.Storage, error) {
 	conn, err := p.open(logger)
 	if err != nil {
 		return nil, err
@@ -164,7 +162,7 @@ func (p *Postgres) createDataSourceName() string {
 	return strings.Join(parameters, " ")
 }
 
-func (p *Postgres) open(logger log.Logger) (*conn, error) {
+func (p *Postgres) open(logger *slog.Logger) (*conn, error) {
 	dataSourceName := p.createDataSourceName()
 
 	db, err := sql.Open("postgres", dataSourceName)
@@ -208,7 +206,7 @@ func (p *Postgres) open(logger log.Logger) (*conn, error) {
 type MySQL struct {
 	NetworkDB
 
-	SSL SSL `json:"ssl" yaml:"ssl"`
+	SSL SSL `json:"ssl"`
 
 	// TODO(pborzenkov): used by tests to reduce lock wait timeout. Should
 	// we make it exported and allow users to provide arbitrary params?
@@ -216,7 +214,7 @@ type MySQL struct {
 }
 
 // Open creates a new storage implementation backed by MySQL.
-func (s *MySQL) Open(logger log.Logger) (storage.Storage, error) {
+func (s *MySQL) Open(logger *slog.Logger) (storage.Storage, error) {
 	conn, err := s.open(logger)
 	if err != nil {
 		return nil, err
@@ -224,7 +222,7 @@ func (s *MySQL) Open(logger log.Logger) (storage.Storage, error) {
 	return conn, nil
 }
 
-func (s *MySQL) open(logger log.Logger) (*conn, error) {
+func (s *MySQL) open(logger *slog.Logger) (*conn, error) {
 	cfg := mysql.Config{
 		User:                 s.User,
 		Passwd:               s.Password,
@@ -242,6 +240,10 @@ func (s *MySQL) open(logger log.Logger) (*conn, error) {
 		if s.Host[0] != '/' {
 			cfg.Net = "tcp"
 			cfg.Addr = s.Host
+
+			if s.Port != 0 {
+				cfg.Addr = net.JoinHostPort(s.Host, strconv.Itoa(int(s.Port)))
+			}
 		} else {
 			cfg.Net = "unix"
 			cfg.Addr = s.Host
@@ -270,7 +272,7 @@ func (s *MySQL) open(logger log.Logger) (*conn, error) {
 	}
 
 	if s.MaxIdleConns == 0 {
-		/*Override default behaviour to fix https://github.com/dexidp/dex/issues/1608*/
+		/*Override default behavior to fix https://github.com/dexidp/dex/issues/1608*/
 		db.SetMaxIdleConns(0)
 	} else {
 		db.SetMaxIdleConns(s.MaxIdleConns)
@@ -316,7 +318,7 @@ func (s *MySQL) makeTLSConfig() error {
 	cfg := &tls.Config{}
 	if s.SSL.CAFile != "" {
 		rootCertPool := x509.NewCertPool()
-		pem, err := ioutil.ReadFile(s.SSL.CAFile)
+		pem, err := os.ReadFile(s.SSL.CAFile)
 		if err != nil {
 			return err
 		}

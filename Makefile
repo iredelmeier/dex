@@ -1,38 +1,49 @@
+export PATH := $(abspath bin/protoc/bin/):$(abspath bin/):${PATH}
+
 OS = $(shell uname | tr A-Z a-z)
-
-PROJ=dex
-ORG_PATH=github.com/dexidp
-REPO_PATH=$(ORG_PATH)/$(PROJ)
-export PATH := $(PWD)/bin:$(PATH)
-
-VERSION ?= $(shell ./scripts/git-version)
-
-DOCKER_REPO=quay.io/dexidp/dex
-DOCKER_IMAGE=$(DOCKER_REPO):$(VERSION)
-
-$( shell mkdir -p bin )
 
 user=$(shell id -u -n)
 group=$(shell id -g -n)
 
-export GOBIN=$(PWD)/bin
+$( shell mkdir -p bin )
 
-LD_FLAGS="-w -X $(REPO_PATH)/version.Version=$(VERSION)"
+PROJ      = dex
+ORG_PATH  = github.com/dexidp
+REPO_PATH = $(ORG_PATH)/$(PROJ)
+VERSION  ?= $(shell ./scripts/git-version)
+
+
+export GOBIN=$(PWD)/bin
+LD_FLAGS="-w -X main.version=$(VERSION)"
 
 # Dependency versions
-GOLANGCI_VERSION = 1.32.2
+GOLANGCI_VERSION   = 2.15.0
+GOTESTSUM_VERSION ?= 1.13.0
 
-PROTOC_VERSION = 3.15.6
-PROTOC_GEN_GO_VERSION = 1.26.0
-PROTOC_GEN_GO_GRPC_VERSION = 1.1.0
+PROTOC_VERSION             = 29.3
+PROTOC_GEN_GO_VERSION      = 1.36.5
+PROTOC_GEN_GO_GRPC_VERSION = 1.5.1
 
-build: bin/dex
+KIND_VERSION    = 0.22.0
+KIND_NODE_IMAGE = "kindest/node:v1.25.3@sha256:cd248d1438192f7814fbca8fede13cfe5b9918746dfa12583976158a834fd5c5"
+KIND_TMP_DIR    = "$(PWD)/bin/test/dex-kind-kubeconfig"
+
+
+##@ Build
+
+build: bin/dex ## Build Dex binaries.
+
+examples: bin/grpc-client bin/example-app ## Build example app.
+
+.PHONY: release-binary
+release-binary: LD_FLAGS = "-w -X main.version=$(VERSION) -extldflags \"-static\""
+release-binary: ## Build release binaries (used to build a final container image).
+	@go build -o /go/bin/dex -v -ldflags $(LD_FLAGS) $(REPO_PATH)/cmd/dex
+	@go build -o /go/bin/docker-entrypoint -v -ldflags $(LD_FLAGS) $(REPO_PATH)/cmd/docker-entrypoint
 
 bin/dex:
 	@mkdir -p bin/
 	@go install -v -ldflags $(LD_FLAGS) $(REPO_PATH)/cmd/dex
-
-examples: bin/grpc-client bin/example-app
 
 bin/grpc-client:
 	@mkdir -p bin/
@@ -42,117 +53,173 @@ bin/example-app:
 	@mkdir -p bin/
 	@cd examples/ && go install -v -ldflags $(LD_FLAGS) $(REPO_PATH)/examples/example-app
 
-.PHONY: release-binary
-release-binary:
-	@go build -o /go/bin/dex -v -ldflags $(LD_FLAGS) $(REPO_PATH)/cmd/dex
+
+##@ Generate
+
+.PHONY: generate
+generate: generate-proto generate-proto-internal generate-ent go-mod-tidy ## Run all generators.
+
+.PHONY: generate-ent
+generate-ent: ## Generate code for database ORM.
+	@go generate $(REPO_PATH)/storage/ent/
+
+.PHONY: generate-proto
+generate-proto: ## Generate the Dex client's protobuf code.
+	@protoc --go_out=paths=source_relative:. --go-grpc_out=paths=source_relative:. api/v2/*.proto
+	@protoc --go_out=paths=source_relative:. --go-grpc_out=paths=source_relative:. api/*.proto
+
+.PHONY: generate-proto-internal
+generate-proto-internal: ## Generate protobuf code for token encoding.
+	@protoc --go_out=paths=source_relative:. server/internal/*.proto
+
+go-mod-tidy: ## Run go mod tidy for all targets.
+	@go mod tidy
+	@cd examples/ && go mod tidy
+	@cd api/v2/ && go mod tidy
+
+bin/protoc:
+	@mkdir -p bin/protoc
+ifeq ($(shell uname | tr A-Z a-z), darwin)
+	curl -L https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-osx-x86_64.zip > bin/protoc.zip
+endif
+ifeq ($(shell uname | tr A-Z a-z), linux)
+	curl -L https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip > bin/protoc.zip
+endif
+	unzip bin/protoc.zip -d bin/protoc
+	rm bin/protoc.zip
+
+bin/protoc-gen-go:
+	@mkdir -p bin
+	curl -L https://github.com/protocolbuffers/protobuf-go/releases/download/v${PROTOC_GEN_GO_VERSION}/protoc-gen-go.v${PROTOC_GEN_GO_VERSION}.$(shell uname | tr A-Z a-z).amd64.tar.gz | tar -zOxf - protoc-gen-go > ./bin/protoc-gen-go
+	@chmod +x ./bin/protoc-gen-go
+
+bin/protoc-gen-go-grpc:
+	@mkdir -p bin
+	curl -L https://github.com/grpc/grpc-go/releases/download/cmd/protoc-gen-go-grpc/v${PROTOC_GEN_GO_GRPC_VERSION}/protoc-gen-go-grpc.v${PROTOC_GEN_GO_GRPC_VERSION}.$(shell uname | tr A-Z a-z).amd64.tar.gz | tar -zOxf - ./protoc-gen-go-grpc > ./bin/protoc-gen-go-grpc
+	@chmod +x ./bin/protoc-gen-go-grpc
+
+##@ Verify
+
+verify: generate ## Verify that all the code was generated and committed to repository.
+	@git diff --exit-code
+
+.PHONY: verify-proto
+verify-proto: generate-proto ## Verify that the Dex client's protobuf code was generated.
+	@git diff --exit-code
+
+.PHONY: verify-proto
+verify-proto-internal: generate-proto-internal ## Verify internal protobuf code for token encoding was generated.
+	@git diff --exit-code
+
+.PHONY: verify-ent
+verify-ent: generate-ent ## Verify code for database ORM was generated.
+	@git diff --exit-code
+
+.PHONY: verify-go-mod
+verify-go-mod: go-mod-tidy ## Check that go.mod and go.sum formatted according to the changes.
+	@git diff --exit-code
+
+##@ Test and Lint
+
+deps: bin/gotestsum bin/golangci-lint bin/protoc bin/protoc-gen-go bin/protoc-gen-go-grpc bin/kind ## Install dev dependencies.
+
+# Detect if we're running in GitHub Actions
+ifdef GITHUB_ACTIONS
+GOTESTSUM_FORMAT = github-actions
+else
+GOTESTSUM_FORMAT = testname
+GOTESTSUM_FORMAT_ICONS = hivis
+endif
+
+.PHONY: test testrace testall
+test: bin/gotestsum ## Test go code.
+ifdef GOTESTSUM_FORMAT_ICONS
+	@gotestsum --format $(GOTESTSUM_FORMAT) --format-icons $(GOTESTSUM_FORMAT_ICONS) -- -v ./...
+else
+	@gotestsum --format $(GOTESTSUM_FORMAT) -- -v ./...
+endif
+
+testrace: bin/gotestsum ## Test go code and check for possible race conditions.
+ifdef GOTESTSUM_FORMAT_ICONS
+	@gotestsum --format $(GOTESTSUM_FORMAT) --format-icons $(GOTESTSUM_FORMAT_ICONS) -- -v --race ./...
+else
+	@gotestsum --format $(GOTESTSUM_FORMAT) -- -v --race ./...
+endif
+
+testall: testrace ## Run all tests for go code.
+
+.PHONY: lint
+lint: ## Run linter.
+	@golangci-lint version
+	@golangci-lint run
+
+.PHONY: fix
+fix: ## Fix lint violations.
+	@golangci-lint version
+	@golangci-lint fmt
 
 docker-compose.override.yaml:
 	cp docker-compose.override.yaml.dist docker-compose.override.yaml
 
 .PHONY: up
-up: docker-compose.override.yaml ## Launch the development environment
+up: docker-compose.override.yaml ## Launch the development environment.
 	@ if [ docker-compose.override.yaml -ot docker-compose.override.yaml.dist ]; then diff -u docker-compose.override.yaml docker-compose.override.yaml.dist || (echo "!!! The distributed docker-compose.override.yaml example changed. Please update your file accordingly (or at least touch it). !!!" && false); fi
 	docker-compose up -d
 
 .PHONY: down
-down: clear ## Destroy the development environment
+down: clear ## Destroy the development environment.
 	docker-compose down --volumes --remove-orphans --rmi local
 
-test: bin/test/kube-apiserver bin/test/etcd
-	@go test -v ./...
-
-testrace: bin/test/kube-apiserver bin/test/etcd
-	@go test -v --race ./...
-
-export TEST_ASSET_KUBE_APISERVER=$(abspath bin/test/kube-apiserver)
-export TEST_ASSET_ETCD=$(abspath bin/test/etcd)
-
-bin/test/kube-apiserver:
+.PHONY: kind-up kind-down kind-tests
+kind-up: ## Create a kind cluster.
 	@mkdir -p bin/test
-	curl -L https://storage.googleapis.com/k8s-c10s-test-binaries/kube-apiserver-$(shell uname)-x86_64 > bin/test/kube-apiserver
-	chmod +x bin/test/kube-apiserver
+	@kind create cluster --image ${KIND_NODE_IMAGE} --kubeconfig ${KIND_TMP_DIR} --name dex-tests
 
-bin/test/etcd:
-	@mkdir -p bin/test
-	curl -L https://storage.googleapis.com/k8s-c10s-test-binaries/etcd-$(shell uname)-x86_64 > bin/test/etcd
-	chmod +x bin/test/etcd
+kind-tests: export DEX_KUBERNETES_CONFIG_PATH=${KIND_TMP_DIR}
+kind-tests: testall ## Run test on kind cluster (kind cluster must be created).
 
-bin/golangci-lint: bin/golangci-lint-${GOLANGCI_VERSION}
-	@ln -sf golangci-lint-${GOLANGCI_VERSION} bin/golangci-lint
-bin/golangci-lint-${GOLANGCI_VERSION}:
-	curl -sfL https://install.goreleaser.com/github.com/golangci/golangci-lint.sh | BINARY=golangci-lint bash -s -- v${GOLANGCI_VERSION}
-	@mv bin/golangci-lint $@
+kind-down: ## Delete the kind cluster.
+	@kind delete cluster --name dex-tests
+	rm ${KIND_TMP_DIR}
 
-.PHONY: lint
-lint: bin/golangci-lint ## Run linter
-	bin/golangci-lint run
+bin/golangci-lint:
+	@mkdir -p bin
+	curl -sSfL https://golangci-lint.run/install.sh | sh -s v${GOLANGCI_VERSION}
 
-.PHONY: fix
-fix: bin/golangci-lint ## Fix lint violations
-	bin/golangci-lint run --fix
+bin/gotestsum:
+	@mkdir -p bin
+	curl -L https://github.com/gotestyourself/gotestsum/releases/download/v${GOTESTSUM_VERSION}/gotestsum_${GOTESTSUM_VERSION}_$(shell uname | tr A-Z a-z)_amd64.tar.gz | tar -zOxf - gotestsum > ./bin/gotestsum
+	@chmod +x ./bin/gotestsum
 
-.PHONY: docker-image
-docker-image:
-	@sudo docker build -t $(DOCKER_IMAGE) .
+bin/kind:
+	@mkdir -p bin
+	curl -L https://github.com/kubernetes-sigs/kind/releases/download/v${KIND_VERSION}/kind-$(shell uname | tr A-Z a-z)-amd64 > ./bin/kind
+	@chmod +x ./bin/kind
 
-.PHONY: proto-old
-proto-old: bin/protoc-old bin/protoc-gen-go-old
-	@./bin/protoc-old --go_out=plugins=grpc:. --plugin=protoc-gen-go=./bin/protoc-gen-go-old api/v2/*.proto
-	@cp api/v2/*.proto api/
-	@./bin/protoc-old --go_out=plugins=grpc:. --plugin=protoc-gen-go=./bin/protoc-gen-go-old api/*.proto
-
-.PHONY: verify-proto
-verify-proto: proto
-	@./scripts/git-diff
-
-bin/protoc-old: scripts/get-protoc
-	@./scripts/get-protoc bin/protoc-old
-
-bin/protoc-gen-go-old:
-	@mkdir -p tmp
-	@GOBIN=$$PWD/tmp go install -v github.com/golang/protobuf/protoc-gen-go@v1.3.2
-	@mv tmp/protoc-gen-go bin/protoc-gen-go-old
-
-clean:
+##@ Clean
+clean: ## Delete all builds and downloaded dependencies.
 	@rm -rf bin/
 
-testall: testrace
 
-FORCE:
+FORMATTING_BEGIN_YELLOW = \033[0;33m
+FORMATTING_BEGIN_BLUE = \033[36m
+FORMATTING_END = \033[0m
 
-.PHONY: test testrace testall
-
-.PHONY: proto
-proto: bin/protoc bin/protoc-gen-go bin/protoc-gen-go-grpc
-	@./bin/protoc --go_out=paths=source_relative:. --go-grpc_out=paths=source_relative:. --plugin=protoc-gen-go=./bin/protoc-gen-go --plugin=protoc-gen-go-grpc=./bin/protoc-gen-go-grpc api/v2/*.proto
-	@./bin/protoc --go_out=paths=source_relative:. --go-grpc_out=paths=source_relative:. --plugin=protoc-gen-go=./bin/protoc-gen-go --plugin=protoc-gen-go-grpc=./bin/protoc-gen-go-grpc api/*.proto
-	#@cp api/v2/*.proto api/
-
-.PHONY: proto-internal
-proto-internal: bin/protoc bin/protoc-gen-go
-	@./bin/protoc --go_out=paths=source_relative:. --plugin=protoc-gen-go=./bin/protoc-gen-go server/internal/*.proto
-
-bin/protoc: bin/protoc-${PROTOC_VERSION}
-	@ln -sf protoc-${PROTOC_VERSION}/bin/protoc bin/protoc
-bin/protoc-${PROTOC_VERSION}:
-	@mkdir -p bin/protoc-${PROTOC_VERSION}
-ifeq (${OS}, darwin)
-	curl -L https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-osx-x86_64.zip > bin/protoc.zip
-endif
-ifeq (${OS}, linux)
-	curl -L https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip > bin/protoc.zip
-endif
-	unzip bin/protoc.zip -d bin/protoc-${PROTOC_VERSION}
-	rm bin/protoc.zip
-
-bin/protoc-gen-go: bin/protoc-gen-go-${PROTOC_GEN_GO_VERSION}
-	@ln -sf protoc-gen-go-${PROTOC_GEN_GO_VERSION} bin/protoc-gen-go
-bin/protoc-gen-go-${PROTOC_GEN_GO_VERSION}:
-	@mkdir -p bin
-	curl -L https://github.com/protocolbuffers/protobuf-go/releases/download/v${PROTOC_GEN_GO_VERSION}/protoc-gen-go.v${PROTOC_GEN_GO_VERSION}.${OS}.amd64.tar.gz | tar -zOxf - protoc-gen-go > ./bin/protoc-gen-go-${PROTOC_GEN_GO_VERSION} && chmod +x ./bin/protoc-gen-go-${PROTOC_GEN_GO_VERSION}
-
-bin/protoc-gen-go-grpc: bin/protoc-gen-go-grpc-${PROTOC_GEN_GO_GRPC_VERSION}
-	@ln -sf protoc-gen-go-grpc-${PROTOC_GEN_GO_GRPC_VERSION} bin/protoc-gen-go-grpc
-bin/protoc-gen-go-grpc-${PROTOC_GEN_GO_GRPC_VERSION}:
-	@mkdir -p bin
-	curl -L https://github.com/grpc/grpc-go/releases/download/cmd%2Fprotoc-gen-go-grpc%2Fv${PROTOC_GEN_GO_GRPC_VERSION}/protoc-gen-go-grpc.v${PROTOC_GEN_GO_GRPC_VERSION}.${OS}.amd64.tar.gz | tar -zOxf - ./protoc-gen-go-grpc > ./bin/protoc-gen-go-grpc-${PROTOC_GEN_GO_GRPC_VERSION} && chmod +x ./bin/protoc-gen-go-grpc-${PROTOC_GEN_GO_GRPC_VERSION}
+.PHONY: help
+help:
+	@printf -- "${FORMATTING_BEGIN_BLUE}%s${FORMATTING_END}\n" \
+	"" \
+	"       ___             " \
+	"      / _ \_____ __    " \
+	"     / // / -_) \ /    " \
+	"    /____/\__/_\_\     " \
+	"" \
+	"-----------------------" \
+	""
+	@awk 'BEGIN {\
+	    FS = ":.*##"; \
+	    printf                "Usage: ${FORMATTING_BEGIN_BLUE}OPTION${FORMATTING_END}=<value> make ${FORMATTING_BEGIN_YELLOW}<target>${FORMATTING_END}\n"\
+	  } \
+	  /^[a-zA-Z0-9_-]+:.*?##/ { printf "  ${FORMATTING_BEGIN_BLUE}%-46s${FORMATTING_END} %s\n", $$1, $$2 } \
+	  /^.?.?##~/              { printf "   %-46s${FORMATTING_BEGIN_YELLOW}%-46s${FORMATTING_END}\n", "", substr($$1, 6) } \
+	  /^##@/                  { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)

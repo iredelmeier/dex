@@ -6,13 +6,15 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"testing"
 
-	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/require"
+
+	"github.com/dexidp/dex/connector"
 )
 
 func TestUserGroups(t *testing.T) {
@@ -78,6 +80,43 @@ func TestUserLoginFlow(t *testing.T) {
 	expectEquals(t, err, fmt.Errorf("dex is forbidden from making requests to the Atlassian Crowd application by URL %q", s.URL))
 }
 
+// A user deleted or deactivated in Crowd ends the refresh with ErrUserRevoked,
+// which the refresh grant answers with invalid_grant.
+func TestRefreshUserRevoked(t *testing.T) {
+	// Refresh uses the connector's own client, which doesn't trust the TLS test server.
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.RequestURI {
+		case "/rest/usermanagement/1/user?username=deleted":
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"reason": "USER_NOT_FOUND"})
+		case "/rest/usermanagement/1/user?username=wrongpath":
+			w.WriteHeader(http.StatusNotFound)
+		case "/rest/usermanagement/1/user?username=inactive":
+			json.NewEncoder(w).Encode(crowdUser{Active: false, Name: "inactive"})
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer s.Close()
+
+	c := newTestCrowdConnector(s.URL)
+	for _, username := range []string{"deleted", "inactive"} {
+		t.Run(username, func(t *testing.T) {
+			data, err := json.Marshal(refreshData{Username: username})
+			require.NoError(t, err)
+			_, err = c.Refresh(context.Background(), connector.Scopes{}, connector.Identity{ConnectorData: data})
+			require.ErrorIs(t, err, connector.ErrUserRevoked)
+		})
+	}
+
+	// A 404 without Crowd's reason, e.g. from a wrong base URL, is a server error.
+	data, err := json.Marshal(refreshData{Username: "wrongpath"})
+	require.NoError(t, err)
+	_, err = c.Refresh(context.Background(), connector.Scopes{}, connector.Identity{ConnectorData: data})
+	require.Error(t, err)
+	require.NotErrorIs(t, err, connector.ErrUserRevoked)
+}
+
 func TestUserPassword(t *testing.T) {
 	s := newTestServer(map[string]TestServerResponse{
 		"/rest/usermanagement/1/session": {
@@ -115,7 +154,7 @@ func TestIdentityFromCrowdUser(t *testing.T) {
 	expectEquals(t, user.Name, "testuser")
 	expectEquals(t, user.Email, "testuser@example.com")
 
-	// Test unconfigured behaviour
+	// Test unconfigured behavior
 	i := c.identityFromCrowdUser(user)
 	expectEquals(t, i.UserID, "12345")
 	expectEquals(t, i.Username, "testuser")
@@ -151,11 +190,7 @@ type TestServerResponse struct {
 func newTestCrowdConnector(baseURL string) crowdConnector {
 	connector := crowdConnector{}
 	connector.BaseURL = baseURL
-	connector.logger = &logrus.Logger{
-		Out:       ioutil.Discard,
-		Level:     logrus.DebugLevel,
-		Formatter: &logrus.TextFormatter{DisableColors: true},
-	}
+	connector.logger = slog.New(slog.DiscardHandler)
 	return connector
 }
 

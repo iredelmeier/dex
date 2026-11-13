@@ -5,16 +5,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 
 	"github.com/dexidp/dex/connector"
-	"github.com/dexidp/dex/pkg/log"
 )
 
 // NewCallbackConnector returns a mock connector which requires no user interaction. It always returns
 // the same (fake) identity.
-func NewCallbackConnector(logger log.Logger) connector.Connector {
+func NewCallbackConnector(logger *slog.Logger) connector.Connector {
 	return &Callback{
 		Identity: connector.Identity{
 			UserID:        "0-385-28089-0",
@@ -29,35 +29,36 @@ func NewCallbackConnector(logger log.Logger) connector.Connector {
 }
 
 var (
-	_ connector.CallbackConnector = &Callback{}
-
-	_ connector.PasswordConnector = passwordConnector{}
-	_ connector.RefreshConnector  = passwordConnector{}
+	_ connector.CallbackConnector      = &Callback{}
+	_ connector.RefreshConnector       = &Callback{}
+	_ connector.TokenIdentityConnector = &Callback{}
 )
 
 // Callback is a connector that requires no user interaction and always returns the same identity.
 type Callback struct {
 	// The returned identity.
 	Identity connector.Identity
-	Logger   log.Logger
+	Logger   *slog.Logger
+	// TokenIdentityErr, if set, is returned by TokenIdentity instead of Identity.
+	TokenIdentityErr error
 }
 
 // LoginURL returns the URL to redirect the user to login with.
-func (m *Callback) LoginURL(s connector.Scopes, callbackURL, state string) (string, error) {
+func (m *Callback) LoginURL(s connector.Scopes, callbackURL, state string) (string, []byte, error) {
 	u, err := url.Parse(callbackURL)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse callbackURL %q: %v", callbackURL, err)
+		return "", nil, fmt.Errorf("failed to parse callbackURL %q: %v", callbackURL, err)
 	}
 	v := u.Query()
 	v.Set("state", state)
 	u.RawQuery = v.Encode()
-	return u.String(), nil
+	return u.String(), nil, nil
 }
 
 var connectorData = []byte("foobar")
 
 // HandleCallback parses the request and returns the user's identity
-func (m *Callback) HandleCallback(s connector.Scopes, r *http.Request) (connector.Identity, error) {
+func (m *Callback) HandleCallback(s connector.Scopes, connData []byte, r *http.Request) (connector.Identity, error) {
 	return m.Identity, nil
 }
 
@@ -66,11 +67,19 @@ func (m *Callback) Refresh(ctx context.Context, s connector.Scopes, identity con
 	return m.Identity, nil
 }
 
+func (m *Callback) TokenIdentity(ctx context.Context, subjectTokenType, subjectToken string) (connector.Identity, error) {
+	if m.TokenIdentityErr != nil {
+		return connector.Identity{}, m.TokenIdentityErr
+	}
+	return m.Identity, nil
+}
+
 // CallbackConfig holds the configuration parameters for a connector which requires no interaction.
 type CallbackConfig struct{}
 
 // Open returns an authentication strategy which requires no user interaction.
-func (c *CallbackConfig) Open(id string, logger log.Logger) (connector.Connector, error) {
+func (c *CallbackConfig) Open(id string, logger *slog.Logger) (connector.Connector, error) {
+	logger = logger.With(slog.Group("connector", "type", "callback", "id", id))
 	return NewCallbackConnector(logger), nil
 }
 
@@ -82,7 +91,7 @@ type PasswordConfig struct {
 }
 
 // Open returns an authentication strategy which prompts for a predefined username and password.
-func (c *PasswordConfig) Open(id string, logger log.Logger) (connector.Connector, error) {
+func (c *PasswordConfig) Open(id string, logger *slog.Logger) (connector.Connector, error) {
 	if c.Username == "" {
 		return nil, errors.New("no username supplied")
 	}
@@ -92,10 +101,15 @@ func (c *PasswordConfig) Open(id string, logger log.Logger) (connector.Connector
 	return &passwordConnector{c.Username, c.Password, logger}, nil
 }
 
+var (
+	_ connector.PasswordConnector = passwordConnector{}
+	_ connector.RefreshConnector  = passwordConnector{}
+)
+
 type passwordConnector struct {
 	username string
 	password string
-	logger   log.Logger
+	logger   *slog.Logger
 }
 
 func (p passwordConnector) Close() error { return nil }
@@ -107,6 +121,7 @@ func (p passwordConnector) Login(ctx context.Context, s connector.Scopes, userna
 			Username:      "Kilgore Trout",
 			Email:         "kilgore@kilgore.trout",
 			EmailVerified: true,
+			ConnectorData: []byte(`{"test": "true"}`),
 		}, true, nil
 	}
 	return identity, false, nil

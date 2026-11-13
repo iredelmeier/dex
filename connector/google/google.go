@@ -5,23 +5,28 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"log/slog"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
+	"cloud.google.com/go/compute/metadata"
 	"github.com/coreos/go-oidc/v3/oidc"
+	"golang.org/x/exp/slices"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	admin "google.golang.org/api/admin/directory/v1"
+	"google.golang.org/api/impersonate"
 	"google.golang.org/api/option"
 
 	"github.com/dexidp/dex/connector"
 	pkg_groups "github.com/dexidp/dex/pkg/groups"
-	"github.com/dexidp/dex/pkg/log"
 )
 
 const (
-	issuerURL = "https://accounts.google.com"
+	issuerURL                  = "https://accounts.google.com"
+	wildcardDomainToAdminEmail = "*"
 )
 
 // Config holds configuration options for Google logins.
@@ -45,14 +50,33 @@ type Config struct {
 	// check groups with the admin directory api
 	ServiceAccountFilePath string `json:"serviceAccountFilePath"`
 
-	// Required if ServiceAccountFilePath
-	// The email of a GSuite super user which the service account will impersonate
-	// when listing groups
+	// Deprecated: Use DomainToAdminEmail
 	AdminEmail string
+
+	// Required if ServiceAccountFilePath
+	// The map workspace domain to email of a GSuite super user which the service account will impersonate
+	// when listing groups
+	DomainToAdminEmail map[string]string
+
+	// If this field is true, fetch direct group membership and transitive group membership
+	FetchTransitiveGroupMembership bool `json:"fetchTransitiveGroupMembership"`
+
+	// Optional value for the prompt parameter, defaults to consent when offline_access
+	// scope is requested
+	PromptType *string `json:"promptType"`
 }
 
 // Open returns a connector which can be used to login users through Google.
-func (c *Config) Open(id string, logger log.Logger) (conn connector.Connector, err error) {
+func (c *Config) Open(id string, logger *slog.Logger) (conn connector.Connector, err error) {
+	logger = logger.With(slog.Group("connector", "type", "google", "id", id))
+	if c.AdminEmail != "" {
+		logger.Warn(`use "domainToAdminEmail.*" option instead of "adminEmail"`, "deprecated", true)
+		if c.DomainToAdminEmail == nil {
+			c.DomainToAdminEmail = make(map[string]string)
+		}
+
+		c.DomainToAdminEmail[wildcardDomainToAdminEmail] = c.AdminEmail
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 
 	provider, err := oidc.NewProvider(ctx, issuerURL)
@@ -68,10 +92,30 @@ func (c *Config) Open(id string, logger log.Logger) (conn connector.Connector, e
 		scopes = append(scopes, "profile", "email")
 	}
 
-	srv, err := createDirectoryService(c.ServiceAccountFilePath, c.AdminEmail)
-	if err != nil {
+	adminSrv := make(map[string]*admin.Service)
+
+	// We know impersonation is required when using a service account credential
+	// TODO: or is it?
+	if len(c.DomainToAdminEmail) == 0 && c.ServiceAccountFilePath != "" {
 		cancel()
-		return nil, fmt.Errorf("could not create directory service: %v", err)
+		return nil, fmt.Errorf("directory service requires the domainToAdminEmail option to be configured")
+	}
+
+	if (len(c.DomainToAdminEmail) > 0) || slices.Contains(scopes, "groups") {
+		for domain, adminEmail := range c.DomainToAdminEmail {
+			srv, err := createDirectoryService(c.ServiceAccountFilePath, adminEmail, logger)
+			if err != nil {
+				cancel()
+				return nil, fmt.Errorf("could not create directory service: %v", err)
+			}
+
+			adminSrv[domain] = srv
+		}
+	}
+
+	promptType := "consent"
+	if c.PromptType != nil {
+		promptType = *c.PromptType
 	}
 
 	clientID := c.ClientID
@@ -87,13 +131,15 @@ func (c *Config) Open(id string, logger log.Logger) (conn connector.Connector, e
 		verifier: provider.Verifier(
 			&oidc.Config{ClientID: clientID},
 		),
-		logger:                 logger,
-		cancel:                 cancel,
-		hostedDomains:          c.HostedDomains,
-		groups:                 c.Groups,
-		serviceAccountFilePath: c.ServiceAccountFilePath,
-		adminEmail:             c.AdminEmail,
-		adminSrv:               srv,
+		logger:                         logger,
+		cancel:                         cancel,
+		hostedDomains:                  c.HostedDomains,
+		groups:                         c.Groups,
+		serviceAccountFilePath:         c.ServiceAccountFilePath,
+		domainToAdminEmail:             c.DomainToAdminEmail,
+		fetchTransitiveGroupMembership: c.FetchTransitiveGroupMembership,
+		adminSrv:                       adminSrv,
+		promptType:                     promptType,
 	}, nil
 }
 
@@ -103,16 +149,18 @@ var (
 )
 
 type googleConnector struct {
-	redirectURI            string
-	oauth2Config           *oauth2.Config
-	verifier               *oidc.IDTokenVerifier
-	cancel                 context.CancelFunc
-	logger                 log.Logger
-	hostedDomains          []string
-	groups                 []string
-	serviceAccountFilePath string
-	adminEmail             string
-	adminSrv               *admin.Service
+	redirectURI                    string
+	oauth2Config                   *oauth2.Config
+	verifier                       *oidc.IDTokenVerifier
+	cancel                         context.CancelFunc
+	logger                         *slog.Logger
+	hostedDomains                  []string
+	groups                         []string
+	serviceAccountFilePath         string
+	domainToAdminEmail             map[string]string
+	fetchTransitiveGroupMembership bool
+	adminSrv                       map[string]*admin.Service
+	promptType                     string
 }
 
 func (c *googleConnector) Close() error {
@@ -120,9 +168,9 @@ func (c *googleConnector) Close() error {
 	return nil
 }
 
-func (c *googleConnector) LoginURL(s connector.Scopes, callbackURL, state string) (string, error) {
+func (c *googleConnector) LoginURL(s connector.Scopes, callbackURL, state string) (string, []byte, error) {
 	if c.redirectURI != callbackURL {
-		return "", fmt.Errorf("expected callback URL %q did not match the URL in the config %q", callbackURL, c.redirectURI)
+		return "", nil, fmt.Errorf("expected callback URL %q did not match the URL in the config %q", callbackURL, c.redirectURI)
 	}
 
 	var opts []oauth2.AuthCodeOption
@@ -135,9 +183,10 @@ func (c *googleConnector) LoginURL(s connector.Scopes, callbackURL, state string
 	}
 
 	if s.OfflineAccess {
-		opts = append(opts, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
+		opts = append(opts, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", c.promptType))
 	}
-	return c.oauth2Config.AuthCodeURL(state, opts...), nil
+
+	return c.oauth2Config.AuthCodeURL(state, opts...), nil, nil
 }
 
 type oauth2Error struct {
@@ -152,7 +201,7 @@ func (e *oauth2Error) Error() string {
 	return e.error + ": " + e.errorDescription
 }
 
-func (c *googleConnector) HandleCallback(s connector.Scopes, r *http.Request) (identity connector.Identity, err error) {
+func (c *googleConnector) HandleCallback(s connector.Scopes, connData []byte, r *http.Request) (identity connector.Identity, err error) {
 	q := r.URL.Query()
 	if errType := q.Get("error"); errType != "" {
 		return identity, &oauth2Error{errType, q.Get("error_description")}
@@ -172,7 +221,7 @@ func (c *googleConnector) Refresh(ctx context.Context, s connector.Scopes, ident
 	}
 	token, err := c.oauth2Config.TokenSource(ctx, t).Token()
 	if err != nil {
-		return identity, fmt.Errorf("google: failed to get token: %v", err)
+		return identity, fmt.Errorf("google: failed to get token: %w", err)
 	}
 
 	return c.createIdentity(ctx, identity, s, token)
@@ -198,6 +247,15 @@ func (c *googleConnector) createIdentity(ctx context.Context, identity connector
 		return identity, fmt.Errorf("oidc: failed to decode claims: %v", err)
 	}
 
+	// Google sometimes do not return username and other claims. It is correct, according to OIDC spec.
+	// One option to solve this is to call the user endpoint, but Google throttles it more aggressive than
+	// the token endpoint. For concurrent refreshes it is an unwanted behavior.
+	// As a tradeoff, dex preserves previous username and preferred username if absent in the ide token
+	// as a way to keep the claims and do not call the userinfo endpoint.
+	if claims.Username == "" {
+		claims.Username = identity.Username
+	}
+
 	if len(c.hostedDomains) > 0 {
 		found := false
 		for _, domain := range c.hostedDomains {
@@ -213,8 +271,9 @@ func (c *googleConnector) createIdentity(ctx context.Context, identity connector
 	}
 
 	var groups []string
-	if s.Groups && c.adminSrv != nil {
-		groups, err = c.getGroups(claims.Email)
+	if s.Groups && len(c.adminSrv) > 0 {
+		checkedGroups := make(map[string]struct{})
+		groups, err = c.getGroups(claims.Email, c.fetchTransitiveGroupMembership, checkedGroups)
 		if err != nil {
 			return identity, fmt.Errorf("google: could not retrieve groups: %v", err)
 		}
@@ -240,20 +299,43 @@ func (c *googleConnector) createIdentity(ctx context.Context, identity connector
 
 // getGroups creates a connection to the admin directory service and lists
 // all groups the user is a member of
-func (c *googleConnector) getGroups(email string) ([]string, error) {
+func (c *googleConnector) getGroups(email string, fetchTransitiveGroupMembership bool, checkedGroups map[string]struct{}) ([]string, error) {
 	var userGroups []string
 	var err error
 	groupsList := &admin.Groups{}
+	domain := c.extractDomainFromEmail(email)
+	adminSrv, err := c.findAdminService(domain)
+	if err != nil {
+		return nil, err
+	}
+
 	for {
-		groupsList, err = c.adminSrv.Groups.List().
+		groupsList, err = adminSrv.Groups.List().
 			UserKey(email).PageToken(groupsList.NextPageToken).Do()
 		if err != nil {
 			return nil, fmt.Errorf("could not list groups: %v", err)
 		}
 
 		for _, group := range groupsList.Groups {
+			if _, exists := checkedGroups[group.Email]; exists {
+				continue
+			}
+
+			checkedGroups[group.Email] = struct{}{}
 			// TODO (joelspeed): Make desired group key configurable
 			userGroups = append(userGroups, group.Email)
+
+			if !fetchTransitiveGroupMembership {
+				continue
+			}
+
+			// getGroups takes a user's email/alias as well as a group's email/alias
+			transitiveGroups, err := c.getGroups(group.Email, fetchTransitiveGroupMembership, checkedGroups)
+			if err != nil {
+				return nil, fmt.Errorf("could not list transitive groups: %v", err)
+			}
+
+			userGroups = append(userGroups, transitiveGroups...)
 		}
 
 		if groupsList.NextPageToken == "" {
@@ -264,35 +346,121 @@ func (c *googleConnector) getGroups(email string) ([]string, error) {
 	return userGroups, nil
 }
 
-// createDirectoryService loads a google service account credentials file,
-// sets up super user impersonation and creates an admin client for calling
-// the google admin api
-func createDirectoryService(serviceAccountFilePath string, email string) (*admin.Service, error) {
-	if serviceAccountFilePath == "" && email == "" {
-		return nil, nil
+func (c *googleConnector) findAdminService(domain string) (*admin.Service, error) {
+	adminSrv, ok := c.adminSrv[domain]
+	if !ok {
+		adminSrv, ok = c.adminSrv[wildcardDomainToAdminEmail]
+		c.logger.Debug("using wildcard admin email to fetch groups", "admin_email", c.domainToAdminEmail[wildcardDomainToAdminEmail])
 	}
-	if serviceAccountFilePath == "" || email == "" {
-		return nil, fmt.Errorf("directory service requires both serviceAccountFilePath and adminEmail")
+
+	if !ok {
+		return nil, fmt.Errorf("unable to find super admin email, domainToAdminEmail for domain: %s not set, %s is also empty", domain, wildcardDomainToAdminEmail)
 	}
-	jsonCredentials, err := ioutil.ReadFile(serviceAccountFilePath)
+
+	return adminSrv, nil
+}
+
+// extracts the domain name from an email input. If the email is valid, it returns the domain name after the "@" symbol.
+// However, in the case of a broken or invalid email, it returns a wildcard symbol.
+func (c *googleConnector) extractDomainFromEmail(email string) string {
+	at := strings.LastIndex(email, "@")
+	if at >= 0 {
+		_, domain := email[:at], email[at+1:]
+
+		return domain
+	}
+
+	return wildcardDomainToAdminEmail
+}
+
+// getCredentialsFromFilePath reads and returns the service account credentials from the file at the provided path.
+// If an error occurs during the read, it is returned.
+func getCredentialsFromFilePath(serviceAccountFilePath string) ([]byte, error) {
+	jsonCredentials, err := os.ReadFile(serviceAccountFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("error reading credentials from file: %v", err)
 	}
+	return jsonCredentials, nil
+}
 
+// getCredentialsFromDefault retrieves the application's default credentials.
+// If the default credential is empty, it attempts to create a new service with metadata credentials.
+// If successful, it returns the service and nil error.
+// If unsuccessful, it returns the error and a nil service.
+func getCredentialsFromDefault(ctx context.Context, email string, logger *slog.Logger) ([]byte, *admin.Service, error) {
+	credential, err := google.FindDefaultCredentials(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to fetch application default credentials: %w", err)
+	}
+
+	if credential.JSON == nil {
+		logger.Info("JSON is empty, using flow for GCE")
+		service, err := createServiceWithMetadataServer(ctx, email, logger)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, service, nil
+	}
+
+	return credential.JSON, nil, nil
+}
+
+// createServiceWithMetadataServer creates a new service using metadata server.
+// If an error occurs during the process, it is returned along with a nil service.
+func createServiceWithMetadataServer(ctx context.Context, adminEmail string, logger *slog.Logger) (*admin.Service, error) {
+	serviceAccountEmail, err := metadata.EmailWithContext(ctx, "default")
+	logger.Info("discovered serviceAccountEmail", "email", serviceAccountEmail)
+
+	if err != nil {
+		return nil, fmt.Errorf("unable to get service account email from metadata server: %v", err)
+	}
+
+	config := impersonate.CredentialsConfig{
+		TargetPrincipal: serviceAccountEmail,
+		Scopes:          []string{admin.AdminDirectoryGroupReadonlyScope},
+		Lifetime:        0,
+		Subject:         adminEmail,
+	}
+
+	tokenSource, err := impersonate.CredentialsTokenSource(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("unable to impersonate with %s, error: %v", adminEmail, err)
+	}
+
+	return admin.NewService(ctx, option.WithHTTPClient(oauth2.NewClient(ctx, tokenSource)))
+}
+
+// createDirectoryService sets up super user impersonation and creates an admin client for calling
+// the google admin api. If no serviceAccountFilePath is defined, the application default credential
+// is used.
+func createDirectoryService(serviceAccountFilePath, email string, logger *slog.Logger) (service *admin.Service, err error) {
+	var jsonCredentials []byte
+
+	ctx := context.Background()
+	if serviceAccountFilePath == "" {
+		logger.Warn("the application default credential is used since the service account file path is not used")
+		jsonCredentials, service, err = getCredentialsFromDefault(ctx, email, logger)
+		if err != nil {
+			return
+		}
+		if service != nil {
+			return
+		}
+	} else {
+		jsonCredentials, err = getCredentialsFromFilePath(serviceAccountFilePath)
+		if err != nil {
+			return
+		}
+	}
 	config, err := google.JWTConfigFromJSON(jsonCredentials, admin.AdminDirectoryGroupReadonlyScope)
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse client secret file to config: %v", err)
 	}
 
-	// Impersonate an admin. This is mandatory for the admin APIs.
-	config.Subject = email
-
-	ctx := context.Background()
-	client := config.Client(ctx)
-
-	srv, err := admin.NewService(ctx, option.WithHTTPClient(client))
-	if err != nil {
-		return nil, fmt.Errorf("unable to create directory service %v", err)
+	// Only attempt impersonation when there is a user configured
+	if email != "" {
+		config.Subject = email
 	}
-	return srv, nil
+
+	return admin.NewService(ctx, option.WithHTTPClient(config.Client(ctx)))
 }

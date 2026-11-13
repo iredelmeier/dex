@@ -2,49 +2,56 @@ package openshift
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
-	"net"
+	"io"
+	"log/slog"
 	"net/http"
+	"os"
 	"strings"
-	"time"
 
 	"golang.org/x/oauth2"
 
 	"github.com/dexidp/dex/connector"
 	"github.com/dexidp/dex/pkg/groups"
-	"github.com/dexidp/dex/pkg/log"
+	"github.com/dexidp/dex/pkg/httpclient"
 	"github.com/dexidp/dex/storage/kubernetes/k8sapi"
+)
+
+const (
+	wellKnownURLPath = "/.well-known/oauth-authorization-server"
+	usersURLPath     = "/apis/user.openshift.io/v1/users/~"
 )
 
 // Config holds configuration options for OpenShift login
 type Config struct {
-	Issuer       string   `json:"issuer"`
-	ClientID     string   `json:"clientID"`
-	ClientSecret string   `json:"clientSecret"`
-	RedirectURI  string   `json:"redirectURI"`
-	Groups       []string `json:"groups"`
-	InsecureCA   bool     `json:"insecureCA"`
-	RootCA       string   `json:"rootCA"`
+	Issuer           string   `json:"issuer"`
+	ClientID         string   `json:"clientID"`
+	ClientSecret     string   `json:"clientSecret"`
+	ClientSecretFile string   `json:"clientSecretFile"`
+	RedirectURI      string   `json:"redirectURI"`
+	Groups           []string `json:"groups"`
+	InsecureCA       bool     `json:"insecureCA"`
+	RootCA           string   `json:"rootCA"`
 }
 
-var _ connector.CallbackConnector = (*openshiftConnector)(nil)
+var (
+	_ connector.CallbackConnector = (*openshiftConnector)(nil)
+	_ connector.RefreshConnector  = (*openshiftConnector)(nil)
+)
 
 type openshiftConnector struct {
-	apiURL       string
-	redirectURI  string
-	clientID     string
-	clientSecret string
-	cancel       context.CancelFunc
-	logger       log.Logger
-	httpClient   *http.Client
-	oauth2Config *oauth2.Config
-	insecureCA   bool
-	rootCA       string
-	groups       []string
+	apiURL           string
+	redirectURI      string
+	clientID         string
+	clientSecretFile string
+	cancel           context.CancelFunc
+	logger           *slog.Logger
+	httpClient       *http.Client
+	oauth2Config     *oauth2.Config
+	insecureCA       bool
+	rootCA           string
+	groups           []string
 }
 
 type user struct {
@@ -57,27 +64,59 @@ type user struct {
 
 // Open returns a connector which can be used to login users through an upstream
 // OpenShift OAuth2 provider.
-func (c *Config) Open(id string, logger log.Logger) (conn connector.Connector, err error) {
-	ctx, cancel := context.WithCancel(context.Background())
-
-	wellKnownURL := strings.TrimSuffix(c.Issuer, "/") + "/.well-known/oauth-authorization-server"
-	req, err := http.NewRequest(http.MethodGet, wellKnownURL, nil)
-
-	openshiftConnector := openshiftConnector{
-		apiURL:       c.Issuer,
-		cancel:       cancel,
-		clientID:     c.ClientID,
-		clientSecret: c.ClientSecret,
-		insecureCA:   c.InsecureCA,
-		logger:       logger,
-		redirectURI:  c.RedirectURI,
-		rootCA:       c.RootCA,
-		groups:       c.Groups,
+func (c *Config) Open(id string, logger *slog.Logger) (conn connector.Connector, err error) {
+	var rootCAs []string
+	if c.RootCA != "" {
+		rootCAs = append(rootCAs, c.RootCA)
 	}
 
-	if openshiftConnector.httpClient, err = newHTTPClient(c.InsecureCA, c.RootCA); err != nil {
-		cancel()
-		return nil, fmt.Errorf("failed to create HTTP client: %v", err)
+	httpClient, err := httpclient.NewHTTPClient(rootCAs, c.InsecureCA)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP client: %w", err)
+	}
+
+	return c.OpenWithHTTPClient(id, logger, httpClient)
+}
+
+// OpenWithHTTPClient returns a connector which can be used to login users through an upstream
+// OpenShift OAuth2 provider. It provides the ability to inject a http.Client.
+func (c *Config) OpenWithHTTPClient(id string, logger *slog.Logger,
+	httpClient *http.Client,
+) (conn connector.Connector, err error) {
+	if c.ClientSecret != "" && c.ClientSecretFile != "" {
+		return nil, fmt.Errorf("invalid config: clientSecret and clientSecretFile are mutually exclusive")
+	}
+	if c.ClientSecret == "" && c.ClientSecretFile == "" {
+		return nil, fmt.Errorf("invalid config: one of clientSecret or clientSecretFile must be specified")
+	}
+
+	clientSecret := c.ClientSecret
+	if c.ClientSecretFile != "" {
+		clientSecret, err = readClientSecretFile(c.ClientSecretFile)
+		if err != nil {
+			return nil, err
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	wellKnownURL := strings.TrimSuffix(c.Issuer, "/") + wellKnownURLPath
+	req, err := http.NewRequest(http.MethodGet, wellKnownURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create a request to OpenShift endpoint %w", err)
+	}
+
+	openshiftConnector := openshiftConnector{
+		apiURL:           c.Issuer,
+		cancel:           cancel,
+		clientID:         c.ClientID,
+		clientSecretFile: c.ClientSecretFile,
+		insecureCA:       c.InsecureCA,
+		logger:           logger.With(slog.Group("connector", "type", "openshift", "id", id)),
+		redirectURI:      c.RedirectURI,
+		rootCA:           c.RootCA,
+		groups:           c.Groups,
+		httpClient:       httpClient,
 	}
 
 	var metadata struct {
@@ -87,21 +126,19 @@ func (c *Config) Open(id string, logger log.Logger) (conn connector.Connector, e
 
 	resp, err := openshiftConnector.httpClient.Do(req.WithContext(ctx))
 	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("failed to query OpenShift endpoint %v", err)
+		return nil, fmt.Errorf("failed to query OpenShift endpoint %w", err)
 	}
 
 	defer resp.Body.Close()
 
 	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
-		cancel()
-		return nil, fmt.Errorf("discovery through endpoint %s failed to decode body: %v",
+		return nil, fmt.Errorf("discovery through endpoint %s failed to decode body: %w",
 			wellKnownURL, err)
 	}
 
 	openshiftConnector.oauth2Config = &oauth2.Config{
 		ClientID:     c.ClientID,
-		ClientSecret: c.ClientSecret,
+		ClientSecret: clientSecret,
 		Endpoint: oauth2.Endpoint{
 			AuthURL: metadata.Auth, TokenURL: metadata.Token,
 		},
@@ -117,11 +154,12 @@ func (c *openshiftConnector) Close() error {
 }
 
 // LoginURL returns the URL to redirect the user to login with.
-func (c *openshiftConnector) LoginURL(scopes connector.Scopes, callbackURL, state string) (string, error) {
+func (c *openshiftConnector) LoginURL(scopes connector.Scopes, callbackURL, state string) (string, []byte, error) {
 	if c.redirectURI != callbackURL {
-		return "", fmt.Errorf("expected callback URL %q did not match the URL in the config %q", callbackURL, c.redirectURI)
+		return "", nil, fmt.Errorf("expected callback URL %q did not match the URL in the config %q",
+			callbackURL, c.redirectURI)
 	}
-	return c.oauth2Config.AuthCodeURL(state), nil
+	return c.oauth2Config.AuthCodeURL(state), nil, nil
 }
 
 type oauth2Error struct {
@@ -137,7 +175,10 @@ func (e *oauth2Error) Error() string {
 }
 
 // HandleCallback parses the request and returns the user's identity
-func (c *openshiftConnector) HandleCallback(s connector.Scopes, r *http.Request) (identity connector.Identity, err error) {
+func (c *openshiftConnector) HandleCallback(s connector.Scopes,
+	connData []byte,
+	r *http.Request,
+) (identity connector.Identity, err error) {
 	q := r.URL.Query()
 	if errType := q.Get("error"); errType != "" {
 		return identity, &oauth2Error{errType, q.Get("error_description")}
@@ -148,13 +189,41 @@ func (c *openshiftConnector) HandleCallback(s connector.Scopes, r *http.Request)
 		ctx = context.WithValue(r.Context(), oauth2.HTTPClient, c.httpClient)
 	}
 
-	token, err := c.oauth2Config.Exchange(ctx, q.Get("code"))
+	oauth2Cfg, err := c.currentOAuth2Config()
+	if err != nil {
+		return identity, err
+	}
+
+	token, err := oauth2Cfg.Exchange(ctx, q.Get("code"))
 	if err != nil {
 		return identity, fmt.Errorf("oidc: failed to get token: %v", err)
 	}
 
-	client := c.oauth2Config.Client(ctx, token)
+	return c.identity(ctx, s, token)
+}
 
+func (c *openshiftConnector) Refresh(ctx context.Context, s connector.Scopes,
+	oldID connector.Identity,
+) (connector.Identity, error) {
+	var token oauth2.Token
+	err := json.Unmarshal(oldID.ConnectorData, &token)
+	if err != nil {
+		return connector.Identity{}, fmt.Errorf("parsing token: %w", err)
+	}
+	if c.httpClient != nil {
+		ctx = context.WithValue(ctx, oauth2.HTTPClient, c.httpClient)
+	}
+	return c.identity(ctx, s, &token)
+}
+
+func (c *openshiftConnector) identity(ctx context.Context, s connector.Scopes,
+	token *oauth2.Token,
+) (identity connector.Identity, err error) {
+	oauth2Cfg, err := c.currentOAuth2Config()
+	if err != nil {
+		return identity, err
+	}
+	client := oauth2Cfg.Client(ctx, token)
 	user, err := c.user(ctx, client)
 	if err != nil {
 		return identity, fmt.Errorf("openshift: get user: %v", err)
@@ -176,12 +245,20 @@ func (c *openshiftConnector) HandleCallback(s connector.Scopes, r *http.Request)
 		Groups:            user.Groups,
 	}
 
+	if s.OfflineAccess {
+		connData, err := json.Marshal(token)
+		if err != nil {
+			return identity, fmt.Errorf("marshal connector data: %v", err)
+		}
+		identity.ConnectorData = connData
+	}
+
 	return identity, nil
 }
 
 // user function returns the OpenShift user associated with the authenticated user
 func (c *openshiftConnector) user(ctx context.Context, client *http.Client) (u user, err error) {
-	url := c.apiURL + "/apis/user.openshift.io/v1/users/~"
+	url := c.apiURL + usersURLPath
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -195,7 +272,7 @@ func (c *openshiftConnector) user(ctx context.Context, client *http.Client) (u u
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return u, fmt.Errorf("read body: %v", err)
 		}
@@ -209,42 +286,37 @@ func (c *openshiftConnector) user(ctx context.Context, client *http.Client) (u u
 	return u, err
 }
 
+// currentOAuth2Config returns the oauth2 config with the current client secret.
+// When a client secret file is configured, the client secret is re-read from
+// disk on each call so that rotated client secret is picked up without a restart.
+func (c *openshiftConnector) currentOAuth2Config() (*oauth2.Config, error) {
+	if c.clientSecretFile == "" {
+		return c.oauth2Config, nil
+	}
+	clientSecret, err := readClientSecretFile(c.clientSecretFile)
+	if err != nil {
+		return nil, err
+	}
+	cfg := *c.oauth2Config
+	cfg.ClientSecret = clientSecret
+	return &cfg, nil
+}
+
+// readClientSecretFile reads the client secret from path, trimming surrounding whitespace.
+func readClientSecretFile(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to read client secret file %q: %w", path, err)
+	}
+	clientSecret := strings.TrimSpace(string(b))
+	if clientSecret == "" {
+		return "", fmt.Errorf("client secret file %q contains no valid secret", path)
+	}
+	return clientSecret, nil
+}
+
 func validateAllowedGroups(userGroups, allowedGroups []string) bool {
 	matchingGroups := groups.Filter(userGroups, allowedGroups)
 
 	return len(matchingGroups) != 0
-}
-
-// newHTTPClient returns a new HTTP client
-func newHTTPClient(insecureCA bool, rootCA string) (*http.Client, error) {
-	tlsConfig := tls.Config{}
-
-	if insecureCA {
-		tlsConfig = tls.Config{InsecureSkipVerify: true}
-	} else if rootCA != "" {
-		tlsConfig = tls.Config{RootCAs: x509.NewCertPool()}
-		rootCABytes, err := ioutil.ReadFile(rootCA)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read root-ca: %v", err)
-		}
-		if !tlsConfig.RootCAs.AppendCertsFromPEM(rootCABytes) {
-			return nil, fmt.Errorf("no certs found in root CA file %q", rootCA)
-		}
-	}
-
-	return &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tlsConfig,
-			Proxy:           http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-				DualStack: true,
-			}).DialContext,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		},
-	}, nil
 }

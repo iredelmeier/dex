@@ -2,22 +2,29 @@ package oidc
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/sirupsen/logrus"
-	"gopkg.in/square/go-jose.v2"
+	"github.com/go-jose/go-jose/v4"
+	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 
 	"github.com/dexidp/dex/connector"
 )
@@ -49,6 +56,7 @@ func TestHandleCallback(t *testing.T) {
 		name                      string
 		userIDKey                 string
 		userNameKey               string
+		overrideClaimMapping      bool
 		preferredUsernameKey      string
 		emailKey                  string
 		groupsKey                 string
@@ -60,6 +68,11 @@ func TestHandleCallback(t *testing.T) {
 		expectPreferredUsername   string
 		expectedEmailField        string
 		token                     map[string]interface{}
+		groupsRegex               string
+		newGroupFromClaims        []NewGroupFromClaims
+		groupsPrefix              string
+		groupsSuffix              string
+		pkceChallenge             string
 	}{
 		{
 			name:               "simpleCase",
@@ -89,6 +102,23 @@ func TestHandleCallback(t *testing.T) {
 				"sub":            "subvalue",
 				"name":           "namevalue",
 				"mail":           "emailvalue",
+				"email_verified": true,
+			},
+		},
+		{
+			name:                 "overrideWithCustomEmailClaim",
+			userIDKey:            "", // not configured
+			userNameKey:          "", // not configured
+			overrideClaimMapping: true,
+			emailKey:             "custommail",
+			expectUserID:         "subvalue",
+			expectUserName:       "namevalue",
+			expectedEmailField:   "customemailvalue",
+			token: map[string]interface{}{
+				"sub":            "subvalue",
+				"name":           "namevalue",
+				"email":          "emailvalue",
+				"custommail":     "customemailvalue",
 				"email_verified": true,
 			},
 		},
@@ -234,11 +264,291 @@ func TestHandleCallback(t *testing.T) {
 				"cognito:groups": []string{"group3", "group4"},
 			},
 		},
+		{
+			name:                      "customGroupsKeyDespiteGroupsProvidedButOverride",
+			overrideClaimMapping:      true,
+			groupsKey:                 "cognito:groups",
+			expectUserID:              "subvalue",
+			expectUserName:            "namevalue",
+			expectedEmailField:        "emailvalue",
+			expectGroups:              []string{"group3", "group4"},
+			scopes:                    []string{"groups"},
+			insecureSkipEmailVerified: true,
+			token: map[string]interface{}{
+				"sub":            "subvalue",
+				"name":           "namevalue",
+				"user_name":      "username",
+				"email":          "emailvalue",
+				"groups":         []string{"group1", "group2"},
+				"cognito:groups": []string{"group3", "group4"},
+			},
+		},
+		{
+			name:               "singularGroupResponseAsString",
+			userIDKey:          "", // not configured
+			userNameKey:        "", // not configured
+			expectUserID:       "subvalue",
+			expectUserName:     "namevalue",
+			expectGroups:       []string{"group1"},
+			expectedEmailField: "emailvalue",
+			token: map[string]interface{}{
+				"sub":            "subvalue",
+				"name":           "namevalue",
+				"groups":         "group1",
+				"email":          "emailvalue",
+				"email_verified": true,
+			},
+		},
+		{
+			name:               "singularGroupResponseAsMap",
+			userIDKey:          "", // not configured
+			userNameKey:        "", // not configured
+			expectUserID:       "subvalue",
+			expectUserName:     "namevalue",
+			expectGroups:       []string{"group1"},
+			expectedEmailField: "emailvalue",
+			token: map[string]interface{}{
+				"sub":            "subvalue",
+				"name":           "namevalue",
+				"groups":         []map[string]string{{"name": "group1"}},
+				"email":          "emailvalue",
+				"email_verified": true,
+			},
+		},
+		{
+			name:               "multipleGroupResponseAsMap",
+			userIDKey:          "", // not configured
+			userNameKey:        "", // not configured
+			expectUserID:       "subvalue",
+			expectUserName:     "namevalue",
+			expectGroups:       []string{"group1", "group2"},
+			expectedEmailField: "emailvalue",
+			token: map[string]interface{}{
+				"sub":            "subvalue",
+				"name":           "namevalue",
+				"groups":         []map[string]string{{"name": "group1"}, {"name": "group2"}},
+				"email":          "emailvalue",
+				"email_verified": true,
+			},
+		},
+		{
+			name:               "newGroupFromClaims",
+			userIDKey:          "", // not configured
+			userNameKey:        "", // not configured
+			expectUserID:       "subvalue",
+			expectUserName:     "namevalue",
+			expectGroups:       []string{"group1", "gh::acme::pipeline-one", "clr_delim-acme-foobar", "keep_delim-acme-foo-bar", "bk-emailvalue"},
+			expectedEmailField: "emailvalue",
+			newGroupFromClaims: []NewGroupFromClaims{
+				{ // The basic functionality, should create "gh::acme::pipeline-one".
+					Claims: []string{
+						"organization",
+						"pipeline",
+					},
+					Delimiter: "::",
+					Prefix:    "gh",
+				},
+				{ // Non existing claims, should not generate any any new group claim.
+					Claims: []string{
+						"non-existing1",
+						"non-existing2",
+					},
+					Delimiter: "::",
+					Prefix:    "tfe",
+				},
+				{ // In this case the delimiter character("-") should be removed removed from "claim-with-delimiter" claim to ensure the resulting
+					// claim structure is in full control of the Dex operator and not the person creating a new pipeline.
+					// Should create "clr_delim-acme-foobar" and not "tfe-acme-foo-bar".
+					Claims: []string{
+						"organization",
+						"claim-with-delimiter",
+					},
+					Delimiter:      "-",
+					ClearDelimiter: true,
+					Prefix:         "clr_delim",
+				},
+				{ // In this case the delimiter character("-") should be NOT removed from "claim-with-delimiter" claim.
+					// Should create  "keep_delim-acme-foo-bar".
+					Claims: []string{
+						"organization",
+						"claim-with-delimiter",
+					},
+					Delimiter: "-",
+					// ClearDelimiter: false,
+					Prefix: "keep_delim",
+				},
+				{ // Ignore non string claims (like arrays), this should result in "bk-emailvalue".
+					Claims: []string{
+						"non-string-claim",
+						"non-string-claim2",
+						"email",
+					},
+					Delimiter: "-",
+					Prefix:    "bk",
+				},
+			},
+
+			token: map[string]interface{}{
+				"sub":                  "subvalue",
+				"name":                 "namevalue",
+				"groups":               "group1",
+				"organization":         "acme",
+				"pipeline":             "pipeline-one",
+				"email":                "emailvalue",
+				"email_verified":       true,
+				"claim-with-delimiter": "foo-bar",
+				"non-string-claim": []string{
+					"element1",
+					"element2",
+				},
+				"non-string-claim2": 666,
+			},
+		},
+		{
+			name:               "prefixGroupNames",
+			userIDKey:          "", // not configured
+			userNameKey:        "", // not configured
+			expectUserID:       "subvalue",
+			expectUserName:     "namevalue",
+			expectGroups:       []string{"prefix-group1", "prefix-group2", "prefix-groupA", "prefix-groupB"},
+			expectedEmailField: "emailvalue",
+			groupsPrefix:       "prefix-",
+			token: map[string]interface{}{
+				"sub":            "subvalue",
+				"name":           "namevalue",
+				"groups":         []string{"group1", "group2", "groupA", "groupB"},
+				"email":          "emailvalue",
+				"email_verified": true,
+			},
+		},
+		{
+			name:               "suffixGroupNames",
+			userIDKey:          "", // not configured
+			userNameKey:        "", // not configured
+			expectUserID:       "subvalue",
+			expectUserName:     "namevalue",
+			expectGroups:       []string{"group1-suffix", "group2-suffix", "groupA-suffix", "groupB-suffix"},
+			expectedEmailField: "emailvalue",
+			groupsSuffix:       "-suffix",
+			token: map[string]interface{}{
+				"sub":            "subvalue",
+				"name":           "namevalue",
+				"groups":         []string{"group1", "group2", "groupA", "groupB"},
+				"email":          "emailvalue",
+				"email_verified": true,
+			},
+		},
+		{
+			name:               "preAndSuffixGroupNames",
+			userIDKey:          "", // not configured
+			userNameKey:        "", // not configured
+			expectUserID:       "subvalue",
+			expectUserName:     "namevalue",
+			expectGroups:       []string{"prefix-group1-suffix", "prefix-group2-suffix", "prefix-groupA-suffix", "prefix-groupB-suffix"},
+			expectedEmailField: "emailvalue",
+			groupsPrefix:       "prefix-",
+			groupsSuffix:       "-suffix",
+			token: map[string]interface{}{
+				"sub":            "subvalue",
+				"name":           "namevalue",
+				"groups":         []string{"group1", "group2", "groupA", "groupB"},
+				"email":          "emailvalue",
+				"email_verified": true,
+			},
+		},
+		{
+			name:               "filterGroupClaims",
+			userIDKey:          "", // not configured
+			userNameKey:        "", // not configured
+			groupsRegex:        `^.*\d$`,
+			expectUserID:       "subvalue",
+			expectUserName:     "namevalue",
+			expectGroups:       []string{"group1", "group2"},
+			expectedEmailField: "emailvalue",
+			token: map[string]interface{}{
+				"sub":            "subvalue",
+				"name":           "namevalue",
+				"groups":         []string{"group1", "group2", "groupA", "groupB"},
+				"email":          "emailvalue",
+				"email_verified": true,
+			},
+		},
+		{
+			// A groups claim delivered as a single string must still be run
+			// through the configured groupsFilter, like the array form.
+			name:               "filterGroupClaimsString",
+			userIDKey:          "", // not configured
+			userNameKey:        "", // not configured
+			groupsRegex:        `^.*\d$`,
+			expectUserID:       "subvalue",
+			expectUserName:     "namevalue",
+			expectGroups:       nil,
+			expectedEmailField: "emailvalue",
+			token: map[string]interface{}{
+				"sub":            "subvalue",
+				"name":           "namevalue",
+				"groups":         "groupA",
+				"email":          "emailvalue",
+				"email_verified": true,
+			},
+		},
+		{
+			name:               "filterGroupClaimsMap",
+			userIDKey:          "", // not configured
+			userNameKey:        "", // not configured
+			groupsRegex:        `^.*\d$`,
+			expectUserID:       "subvalue",
+			expectUserName:     "namevalue",
+			expectGroups:       []string{"group1", "group2"},
+			expectedEmailField: "emailvalue",
+			token: map[string]interface{}{
+				"sub":            "subvalue",
+				"name":           "namevalue",
+				"groups":         []map[string]string{{"name": "group1"}, {"name": "group2"}, {"name": "groupA"}, {"name": "groupB"}},
+				"email":          "emailvalue",
+				"email_verified": true,
+			},
+		},
+		{
+			name:               "S256PKCEChallenge",
+			userIDKey:          "", // not configured
+			userNameKey:        "", // not configured
+			pkceChallenge:      "S256",
+			expectUserID:       "subvalue",
+			expectUserName:     "namevalue",
+			expectGroups:       []string{"group1", "group2"},
+			expectedEmailField: "emailvalue",
+			token: map[string]interface{}{
+				"sub":            "subvalue",
+				"name":           "namevalue",
+				"groups":         []string{"group1", "group2"},
+				"email":          "emailvalue",
+				"email_verified": true,
+			},
+		},
+		{
+			name:               "plainPKCEChallenge",
+			userIDKey:          "", // not configured
+			userNameKey:        "", // not configured
+			pkceChallenge:      "plain",
+			expectUserID:       "subvalue",
+			expectUserName:     "namevalue",
+			expectGroups:       []string{"group1", "group2"},
+			expectedEmailField: "emailvalue",
+			token: map[string]interface{}{
+				"sub":            "subvalue",
+				"name":           "namevalue",
+				"groups":         []string{"group1", "group2"},
+				"email":          "emailvalue",
+				"email_verified": true,
+			},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			testServer, err := setupServer(tc.token)
+			idTokenDesired := true
+			testServer, err := setupServer(tc.token, idTokenDesired)
 			if err != nil {
 				t.Fatal("failed to setup test server", err)
 			}
@@ -263,10 +573,16 @@ func TestHandleCallback(t *testing.T) {
 				InsecureSkipEmailVerified: tc.insecureSkipEmailVerified,
 				InsecureEnableGroups:      true,
 				BasicAuthUnsupported:      &basicAuth,
+				OverrideClaimMapping:      tc.overrideClaimMapping,
+				PKCEChallenge:             tc.pkceChallenge,
 			}
 			config.ClaimMapping.PreferredUsernameKey = tc.preferredUsernameKey
 			config.ClaimMapping.EmailKey = tc.emailKey
 			config.ClaimMapping.GroupsKey = tc.groupsKey
+			config.ClaimMutations.NewGroupFromClaims = tc.newGroupFromClaims
+			config.ClaimMutations.FilterGroupClaims.GroupsFilter = tc.groupsRegex
+			config.ClaimMutations.ModifyGroupNames.Prefix = tc.groupsPrefix
+			config.ClaimMutations.ModifyGroupNames.Suffix = tc.groupsSuffix
 
 			conn, err := newConnector(config)
 			if err != nil {
@@ -278,7 +594,11 @@ func TestHandleCallback(t *testing.T) {
 				t.Fatal("failed to create request", err)
 			}
 
-			identity, err := conn.HandleCallback(connector.Scopes{Groups: true}, req)
+			connectorDataStrTemplate := `{"codeChallenge":"abcdefgh123456qwertuiop89101112uvpwizABC234","codeChallengeMethod":"%s"}`
+			connectorDataStr := fmt.Sprintf(connectorDataStrTemplate, config.PKCEChallenge)
+			connectorData := []byte(connectorDataStr)
+
+			identity, err := conn.HandleCallback(connector.Scopes{Groups: true}, connectorData, req)
 			if err != nil {
 				t.Fatal("handle callback failed", err)
 			}
@@ -293,7 +613,466 @@ func TestHandleCallback(t *testing.T) {
 	}
 }
 
-func setupServer(tok map[string]interface{}) (*httptest.Server, error) {
+func TestRefresh(t *testing.T) {
+	t.Helper()
+
+	tests := []struct {
+		name           string
+		expectUserID   string
+		expectUserName string
+		idTokenDesired bool
+		token          map[string]interface{}
+	}{
+		{
+			name:           "IDTokenOnRefresh",
+			expectUserID:   "subvalue",
+			expectUserName: "namevalue",
+			idTokenDesired: true,
+			token: map[string]interface{}{
+				"sub":  "subvalue",
+				"name": "namevalue",
+			},
+		},
+		{
+			name:           "NoIDTokenOnRefresh",
+			expectUserID:   "subvalue",
+			expectUserName: "namevalue",
+			idTokenDesired: false,
+			token: map[string]interface{}{
+				"sub":  "subvalue",
+				"name": "namevalue",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			testServer, err := setupServer(tc.token, tc.idTokenDesired)
+			if err != nil {
+				t.Fatal("failed to setup test server", err)
+			}
+			defer testServer.Close()
+
+			scopes := []string{"openid", "offline_access"}
+			serverURL := testServer.URL
+			config := Config{
+				Issuer:       serverURL,
+				ClientID:     "clientID",
+				ClientSecret: "clientSecret",
+				Scopes:       scopes,
+				RedirectURI:  fmt.Sprintf("%s/callback", serverURL),
+				GetUserInfo:  true,
+			}
+
+			conn, err := newConnector(config)
+			if err != nil {
+				t.Fatal("failed to create new connector", err)
+			}
+
+			req, err := newRequestWithAuthCode(testServer.URL, "someCode")
+			if err != nil {
+				t.Fatal("failed to create request", err)
+			}
+
+			refreshTokenStr := "{\"RefreshToken\":\"asdf\"}"
+			refreshToken := []byte(refreshTokenStr)
+
+			identity := connector.Identity{
+				UserID:        tc.expectUserID,
+				Username:      tc.expectUserName,
+				ConnectorData: refreshToken,
+			}
+
+			refreshIdentity, err := conn.Refresh(req.Context(), connector.Scopes{OfflineAccess: true}, identity)
+			if err != nil {
+				t.Fatal("Refresh failed", err)
+			}
+
+			expectEquals(t, refreshIdentity.UserID, tc.expectUserID)
+			expectEquals(t, refreshIdentity.Username, tc.expectUserName)
+		})
+	}
+}
+
+// TestRefreshUpstreamRejection verifies that a refresh the upstream refuses keeps
+// the upstream's OAuth2 error, so the server can tell a rejected refresh token
+// apart from other failures.
+func TestRefreshUpstreamRejection(t *testing.T) {
+	mux, err := oidcTestMux(map[string]interface{}{"sub": "subvalue"}, true)
+	require.NoError(t, err)
+
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/token" {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Add("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(&map[string]string{
+			"error":             "invalid_grant",
+			"error_description": "The refresh token is invalid or expired.",
+		})
+	}))
+	defer testServer.Close()
+
+	conn, err := newConnector(Config{
+		Issuer:       testServer.URL,
+		ClientID:     "clientID",
+		ClientSecret: "clientSecret",
+		Scopes:       []string{"openid", "offline_access"},
+		RedirectURI:  fmt.Sprintf("%s/callback", testServer.URL),
+	})
+	require.NoError(t, err)
+
+	_, err = conn.Refresh(t.Context(), connector.Scopes{OfflineAccess: true}, connector.Identity{
+		ConnectorData: []byte(`{"RefreshToken":"asdf"}`),
+	})
+
+	var retrieveErr *oauth2.RetrieveError
+	require.ErrorAs(t, err, &retrieveErr)
+	require.Equal(t, "invalid_grant", retrieveErr.ErrorCode)
+}
+
+func TestTokenIdentity(t *testing.T) {
+	tokenTypeAccess := "urn:ietf:params:oauth:token-type:access_token"
+	tokenTypeID := "urn:ietf:params:oauth:token-type:id_token"
+	long2short := map[string]string{
+		tokenTypeAccess: "access_token",
+		tokenTypeID:     "id_token",
+	}
+
+	tests := []struct {
+		name        string
+		subjectType string
+		userInfo    bool
+		expectError bool
+	}{
+		{
+			name:        "id_token",
+			subjectType: tokenTypeID,
+		}, {
+			name:        "access_token",
+			subjectType: tokenTypeAccess,
+			expectError: true,
+		}, {
+			name:        "id_token with user info",
+			subjectType: tokenTypeID,
+			userInfo:    true,
+		}, {
+			name:        "access_token with user info",
+			subjectType: tokenTypeAccess,
+			userInfo:    true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+
+			testServer, err := setupServer(map[string]any{
+				"sub":  "subvalue",
+				"name": "namevalue",
+			}, true)
+			if err != nil {
+				t.Fatal("failed to setup test server", err)
+			}
+			conn, err := newConnector(Config{
+				Issuer:      testServer.URL,
+				Scopes:      []string{"openid", "groups"},
+				GetUserInfo: tc.userInfo,
+			})
+			if err != nil {
+				t.Fatal("failed to create new connector", err)
+			}
+
+			res, err := http.Get(testServer.URL + "/token")
+			if err != nil {
+				t.Fatal("failed to get initial token", err)
+			}
+			defer res.Body.Close()
+			var tokenResponse map[string]any
+			err = json.NewDecoder(res.Body).Decode(&tokenResponse)
+			if err != nil {
+				t.Fatal("failed to decode initial token", err)
+			}
+
+			origToken := tokenResponse[long2short[tc.subjectType]].(string)
+			identity, err := conn.TokenIdentity(ctx, tc.subjectType, origToken)
+			if err != nil {
+				if tc.expectError {
+					return
+				}
+				t.Fatal("failed to get token identity", err)
+			}
+
+			// assert identity
+			expectEquals(t, identity.UserID, "subvalue")
+			expectEquals(t, identity.Username, "namevalue")
+		})
+	}
+}
+
+// TestTokenIdentityRootCAsWithOverride is a regression test for the override
+// branch of getProvider dropping the rootCAs-aware HTTP client.
+//
+// The connector is configured with both a custom RootCAs trust bundle (the
+// self-signed CA of a TLS test server) and ProviderDiscoveryOverrides, which
+// routes provider construction through getProvider's override branch. An
+// RFC 8693 id_token exchange then verifies the token signature, which requires
+// fetching the JWKS from the TLS server. That fetch uses the provider's
+// build-time HTTP client, so it only succeeds if the override branch retained
+// the rootCAs client.
+//
+// Before the fix the override branch built the provider with
+// context.Background(), discarding the rootCAs client; JWKS verification then
+// fell back to the system trust store and failed with
+// "x509: certificate signed by unknown authority".
+func TestTokenIdentityRootCAsWithOverride(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	testServer, caPEM, err := setupTLSServer(map[string]any{
+		"sub":  "subvalue",
+		"name": "namevalue",
+	}, true)
+	require.NoError(t, err)
+	defer testServer.Close()
+
+	conn, err := newConnector(Config{
+		Issuer:  testServer.URL,
+		Scopes:  []string{"openid", "groups"},
+		RootCAs: []string{caPEM},
+		// Setting an override forces provider construction through the override
+		// branch of getProvider. The JWKS URL matches discovery, so behavior
+		// is otherwise identical to the no-override case.
+		ProviderDiscoveryOverrides: ProviderDiscoveryOverrides{
+			JWKSURL: testServer.URL + "/keys",
+		},
+	})
+	require.NoError(t, err)
+
+	res, err := testServer.Client().Get(testServer.URL + "/token")
+	require.NoError(t, err)
+	defer res.Body.Close()
+
+	var tokenResponse map[string]any
+	require.NoError(t, json.NewDecoder(res.Body).Decode(&tokenResponse))
+
+	origToken := tokenResponse["id_token"].(string)
+	identity, err := conn.TokenIdentity(ctx, "urn:ietf:params:oauth:token-type:id_token", origToken)
+	require.NoError(t, err)
+
+	expectEquals(t, identity.UserID, "subvalue")
+	expectEquals(t, identity.Username, "namevalue")
+}
+
+func TestTokenIdentityKeysFetchTimeout(t *testing.T) {
+	defer func(timeout time.Duration) { jwksFetchTimeout = timeout }(jwksFetchTimeout)
+	jwksFetchTimeout = 200 * time.Millisecond
+
+	backend, err := setupServer(map[string]any{
+		"sub":  "subvalue",
+		"name": "namevalue",
+	}, true)
+	require.NoError(t, err)
+	defer backend.Close()
+	backendURL, err := url.Parse(backend.URL)
+	require.NoError(t, err)
+	proxy := httputil.NewSingleHostReverseProxy(backendURL)
+
+	// While keysDown is set, the keys endpoint accepts the connection and
+	// never answers. stop releases a hanging request when the test ends.
+	var keysDown atomic.Bool
+	keysDown.Store(true)
+	stop := make(chan struct{})
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/keys" && keysDown.Load() {
+			select {
+			case <-r.Context().Done():
+			case <-stop:
+			}
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	defer testServer.Close()
+	defer close(stop)
+
+	conn, err := newConnector(Config{
+		Issuer: testServer.URL,
+		Scopes: []string{"openid", "groups"},
+	})
+	require.NoError(t, err)
+
+	res, err := http.Get(testServer.URL + "/token")
+	require.NoError(t, err)
+	defer res.Body.Close()
+	var tokenResponse map[string]any
+	require.NoError(t, json.NewDecoder(res.Body).Decode(&tokenResponse))
+	idToken := tokenResponse["id_token"].(string)
+
+	const tokenTypeID = "urn:ietf:params:oauth:token-type:id_token"
+	ctx := context.Background()
+
+	// Run the exchange in the background so the test fails instead of hanging
+	// when the key fetch has no limit.
+	errc := make(chan error, 1)
+	go func() {
+		_, err := conn.TokenIdentity(ctx, tokenTypeID, idToken)
+		errc <- err
+	}()
+	select {
+	case err := <-errc:
+		require.Error(t, err)
+	case <-time.After(jwksFetchTimeout + 2*time.Second):
+		t.Fatal("token exchange hung, the key fetch is not bounded")
+	}
+
+	// The failed fetch does not stick: once the keys endpoint answers, the
+	// next exchange verifies. go-oidc signals the failed fetch before it clears
+	// it, so a call right after can still get the old error: retry briefly.
+	keysDown.Store(false)
+	var identity connector.Identity
+	require.Eventually(t, func() bool {
+		var err error
+		identity, err = conn.TokenIdentity(ctx, tokenTypeID, idToken)
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond)
+	expectEquals(t, identity.UserID, "subvalue")
+}
+
+func TestPromptType(t *testing.T) {
+	pointer := func(s string) *string {
+		return &s
+	}
+
+	tests := []struct {
+		name       string
+		promptType *string
+		res        string
+	}{
+		{name: "none", promptType: pointer("none"), res: "none"},
+		{name: "provided empty string", promptType: pointer(""), res: ""},
+		{name: "login", promptType: pointer("login"), res: "login"},
+		{name: "consent", promptType: pointer("consent"), res: "consent"},
+		{name: "default value", promptType: nil, res: "consent"},
+	}
+
+	testServer, err := setupServer(nil, true)
+	require.NoError(t, err)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := newConnector(Config{
+				Issuer:     testServer.URL,
+				Scopes:     []string{"openid", "groups"},
+				PromptType: tc.promptType,
+			})
+			require.NoError(t, err)
+
+			require.Equal(t, tc.res, conn.promptType)
+		})
+	}
+}
+
+func TestProviderOverride(t *testing.T) {
+	testServer, err := setupServer(map[string]any{
+		"sub":  "subvalue",
+		"name": "namevalue",
+	}, true)
+	if err != nil {
+		t.Fatal("failed to setup test server", err)
+	}
+
+	t.Run("No override", func(t *testing.T) {
+		conn, err := newConnector(Config{
+			Issuer: testServer.URL,
+			Scopes: []string{"openid", "groups"},
+		})
+		if err != nil {
+			t.Fatal("failed to create new connector", err)
+		}
+
+		expAuth := fmt.Sprintf("%s/authorize", testServer.URL)
+		if conn.provider.Endpoint().AuthURL != expAuth {
+			t.Fatalf("unexpected auth URL: %s, expected: %s\n", conn.provider.Endpoint().AuthURL, expAuth)
+		}
+
+		expToken := fmt.Sprintf("%s/token", testServer.URL)
+		if conn.provider.Endpoint().TokenURL != expToken {
+			t.Fatalf("unexpected token URL: %s, expected: %s\n", conn.provider.Endpoint().TokenURL, expToken)
+		}
+	})
+
+	t.Run("Override", func(t *testing.T) {
+		conn, err := newConnector(Config{
+			Issuer:                     testServer.URL,
+			Scopes:                     []string{"openid", "groups"},
+			ProviderDiscoveryOverrides: ProviderDiscoveryOverrides{TokenURL: "/test1", AuthURL: "/test2"},
+		})
+		if err != nil {
+			t.Fatal("failed to create new connector", err)
+		}
+
+		expAuth := "/test2"
+		if conn.provider.Endpoint().AuthURL != expAuth {
+			t.Fatalf("unexpected auth URL: %s, expected: %s\n", conn.provider.Endpoint().AuthURL, expAuth)
+		}
+
+		expToken := "/test1"
+		if conn.provider.Endpoint().TokenURL != expToken {
+			t.Fatalf("unexpected token URL: %s, expected: %s\n", conn.provider.Endpoint().TokenURL, expToken)
+		}
+	})
+
+	t.Run("Override userinfo and device auth URLs", func(t *testing.T) {
+		// A second server whose userinfo endpoint returns a distinct subject,
+		// so we can prove the overridden endpoint (not the discovery default)
+		// is the one actually used.
+		overrideServer, err := setupServer(map[string]any{"sub": "override-sub"}, true)
+		if err != nil {
+			t.Fatal("failed to setup override server", err)
+		}
+		defer overrideServer.Close()
+
+		conn, err := newConnector(Config{
+			Issuer: testServer.URL,
+			Scopes: []string{"openid", "groups"},
+			ProviderDiscoveryOverrides: ProviderDiscoveryOverrides{
+				DeviceAuthURL: "/test-device",
+				UserInfoURL:   fmt.Sprintf("%s/userinfo", overrideServer.URL),
+			},
+		})
+		if err != nil {
+			t.Fatal("failed to create new connector", err)
+		}
+
+		expDevice := "/test-device"
+		if conn.provider.Endpoint().DeviceAuthURL != expDevice {
+			t.Fatalf("unexpected device auth URL: %s, expected: %s\n", conn.provider.Endpoint().DeviceAuthURL, expDevice)
+		}
+
+		userInfo, err := conn.provider.UserInfo(context.Background(), oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "sometoken"}))
+		if err != nil {
+			t.Fatal("failed to call UserInfo", err)
+		}
+		if userInfo.Subject != "override-sub" {
+			t.Fatalf("UserInfo did not use the overridden endpoint: got subject %q, expected %q", userInfo.Subject, "override-sub")
+		}
+	})
+}
+
+// issuerURL derives the issuer base URL from the request, honoring TLS so the
+// same handler set can back both plain-HTTP and HTTPS test servers.
+func issuerURL(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://%s", scheme, r.Host)
+}
+
+func oidcTestMux(tok map[string]interface{}, idTokenDesired bool, userInfoOverride ...map[string]interface{}) (*http.ServeMux, error) {
 	key, err := rsa.GenerateKey(rand.Reader, 1024)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate rsa key: %v", err)
@@ -310,7 +1089,7 @@ func setupServer(tok map[string]interface{}) (*httptest.Server, error) {
 	mux.HandleFunc("/keys", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(&map[string]interface{}{
 			"keys": []map[string]interface{}{{
-				"alg": jwk.Algorithm,
+				"alg": "RS256",
 				"kty": jwk.Algorithm,
 				"kid": jwk.KeyID,
 				"n":   n(&key.PublicKey),
@@ -320,7 +1099,7 @@ func setupServer(tok map[string]interface{}) (*httptest.Server, error) {
 	})
 
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
-		url := fmt.Sprintf("http://%s", r.Host)
+		url := issuerURL(r)
 		tok["iss"] = url
 		tok["exp"] = time.Now().Add(time.Hour).Unix()
 		tok["aud"] = "clientID"
@@ -330,15 +1109,32 @@ func setupServer(tok map[string]interface{}) (*httptest.Server, error) {
 		}
 
 		w.Header().Add("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(&map[string]string{
-			"access_token": token,
-			"id_token":     token,
-			"token_type":   "Bearer",
-		})
+		if idTokenDesired {
+			json.NewEncoder(w).Encode(&map[string]string{
+				"access_token": token,
+				"id_token":     token,
+				"token_type":   "Bearer",
+			})
+		} else {
+			json.NewEncoder(w).Encode(&map[string]string{
+				"access_token": token,
+				"token_type":   "Bearer",
+			})
+		}
+	})
+
+	userInfo := tok
+	if len(userInfoOverride) > 0 {
+		userInfo = userInfoOverride[0]
+	}
+
+	mux.HandleFunc("/userinfo", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(userInfo)
 	})
 
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
-		url := fmt.Sprintf("http://%s", r.Host)
+		url := issuerURL(r)
 
 		json.NewEncoder(w).Encode(&map[string]string{
 			"issuer":                 url,
@@ -349,7 +1145,30 @@ func setupServer(tok map[string]interface{}) (*httptest.Server, error) {
 		})
 	})
 
+	return mux, nil
+}
+
+func setupServer(tok map[string]interface{}, idTokenDesired bool, userInfoOverride ...map[string]interface{}) (*httptest.Server, error) {
+	mux, err := oidcTestMux(tok, idTokenDesired, userInfoOverride...)
+	if err != nil {
+		return nil, err
+	}
 	return httptest.NewServer(mux), nil
+}
+
+// setupTLSServer starts an HTTPS OIDC test server and returns the server along
+// with its self-signed CA in PEM form, suitable for the connector's RootCAs.
+func setupTLSServer(tok map[string]interface{}, idTokenDesired bool) (*httptest.Server, string, error) {
+	mux, err := oidcTestMux(tok, idTokenDesired)
+	if err != nil {
+		return nil, "", err
+	}
+	srv := httptest.NewTLSServer(mux)
+	caPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: srv.Certificate().Raw,
+	})
+	return srv, string(caPEM), nil
 }
 
 func newToken(key *jose.JSONWebKey, claims map[string]interface{}) (string, error) {
@@ -376,7 +1195,7 @@ func newToken(key *jose.JSONWebKey, claims map[string]interface{}) (string, erro
 }
 
 func newConnector(config Config) (*oidcConnector, error) {
-	logger := logrus.New()
+	logger := slog.New(slog.DiscardHandler)
 	conn, err := config.Open("id", logger)
 	if err != nil {
 		return nil, fmt.Errorf("unable to open: %v", err)
@@ -422,4 +1241,281 @@ func expectEquals(t *testing.T, a interface{}, b interface{}) {
 	if !reflect.DeepEqual(a, b) {
 		t.Errorf("Expected %+v to equal %+v", a, b)
 	}
+}
+
+func TestLogoutURL(t *testing.T) {
+	tests := []struct {
+		name                  string
+		endSessionURL         string
+		postLogoutRedirectURI string
+		wantURL               string
+		wantEmpty             bool
+	}{
+		{
+			name:          "no end_session_endpoint",
+			endSessionURL: "",
+			wantEmpty:     true,
+		},
+		{
+			name:          "with end_session_endpoint, no redirect",
+			endSessionURL: "https://provider.example.com/logout",
+			wantURL:       "https://provider.example.com/logout",
+		},
+		{
+			name:                  "with end_session_endpoint and redirect",
+			endSessionURL:         "https://provider.example.com/logout",
+			postLogoutRedirectURI: "https://dex.example.com/logout/callback",
+			wantURL:               "https://provider.example.com/logout?client_id=clientID&post_logout_redirect_uri=https%3A%2F%2Fdex.example.com%2Flogout%2Fcallback",
+		},
+		{
+			name:                  "with existing query params",
+			endSessionURL:         "https://provider.example.com/logout?existing=param",
+			postLogoutRedirectURI: "https://dex.example.com/callback",
+			wantURL:               "https://provider.example.com/logout?client_id=clientID&existing=param&post_logout_redirect_uri=https%3A%2F%2Fdex.example.com%2Fcallback",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &oidcConnector{
+				endSessionURL: tc.endSessionURL,
+				oauth2Config: &oauth2.Config{
+					ClientID: "clientID",
+				},
+			}
+
+			got, err := conn.LogoutURL(context.Background(), tc.postLogoutRedirectURI)
+			require.NoError(t, err)
+
+			if tc.wantEmpty {
+				require.Empty(t, got)
+				return
+			}
+
+			require.Equal(t, tc.wantURL, got)
+		})
+	}
+}
+
+func TestEndSessionURLDiscovery(t *testing.T) {
+	// Setup a server that advertises end_session_endpoint in discovery.
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	require.NoError(t, err)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/keys", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(&map[string]interface{}{
+			"keys": []map[string]interface{}{},
+		})
+	})
+
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		url := fmt.Sprintf("http://%s", r.Host)
+		json.NewEncoder(w).Encode(&map[string]string{
+			"issuer":                 url,
+			"token_endpoint":         fmt.Sprintf("%s/token", url),
+			"authorization_endpoint": fmt.Sprintf("%s/authorize", url),
+			"jwks_uri":               fmt.Sprintf("%s/keys", url),
+			"end_session_endpoint":   fmt.Sprintf("%s/logout", url),
+		})
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	_ = key // We only need the server for discovery.
+
+	conn, err := newConnector(Config{
+		Issuer: ts.URL,
+		Scopes: []string{"openid"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, fmt.Sprintf("%s/logout", ts.URL), conn.endSessionURL)
+}
+
+func TestEndSessionURLOverride(t *testing.T) {
+	testServer, err := setupServer(nil, true)
+	require.NoError(t, err)
+	defer testServer.Close()
+
+	conn, err := newConnector(Config{
+		Issuer: testServer.URL,
+		Scopes: []string{"openid"},
+		ProviderDiscoveryOverrides: ProviderDiscoveryOverrides{
+			EndSessionURL: "https://custom.example.com/logout",
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "https://custom.example.com/logout", conn.endSessionURL)
+}
+
+func TestHandleCallbackUserInfoSubMatch(t *testing.T) {
+	tests := []struct {
+		name string
+		// When set, the userinfo endpoint returns this sub instead of the ID Token's.
+		userInfoSub string
+		expectError bool
+	}{
+		{
+			name: "userinfo sub matches id_token sub",
+		},
+		{
+			name:        "userinfo sub differs from id_token sub",
+			userInfoSub: "other-subvalue",
+			expectError: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var userInfoOverride []map[string]interface{}
+			if tc.userInfoSub != "" {
+				userInfoOverride = append(userInfoOverride, map[string]interface{}{"sub": tc.userInfoSub})
+			}
+
+			testServer, err := setupServer(map[string]interface{}{
+				"sub":            "subvalue",
+				"name":           "namevalue",
+				"email":          "emailvalue",
+				"email_verified": true,
+			}, true, userInfoOverride...)
+			if err != nil {
+				t.Fatal("failed to setup test server", err)
+			}
+			defer testServer.Close()
+
+			basicAuth := true
+			conn, err := newConnector(Config{
+				Issuer:               testServer.URL,
+				ClientID:             "clientID",
+				ClientSecret:         "clientSecret",
+				RedirectURI:          fmt.Sprintf("%s/callback", testServer.URL),
+				GetUserInfo:          true,
+				BasicAuthUnsupported: &basicAuth,
+			})
+			if err != nil {
+				t.Fatal("failed to create new connector", err)
+			}
+
+			req, err := newRequestWithAuthCode(testServer.URL, "someCode")
+			if err != nil {
+				t.Fatal("failed to create request", err)
+			}
+
+			connectorData := []byte(`{"codeChallenge":"","codeChallengeMethod":""}`)
+			identity, err := conn.HandleCallback(connector.Scopes{}, connectorData, req)
+			if tc.expectError {
+				if err == nil {
+					t.Fatalf("expected the userinfo sub mismatch to be rejected, got identity %+v", identity)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal("handle callback failed", err)
+			}
+			expectEquals(t, identity.UserID, "subvalue")
+		})
+	}
+}
+
+func TestTokenIdentityKeysUnavailable(t *testing.T) {
+	backend, err := setupServer(map[string]any{
+		"sub":  "subvalue",
+		"name": "namevalue",
+	}, true)
+	require.NoError(t, err)
+	defer backend.Close()
+	backendURL, err := url.Parse(backend.URL)
+	require.NoError(t, err)
+	proxy := httputil.NewSingleHostReverseProxy(backendURL)
+
+	// While keysDown is set, the keys endpoint fails.
+	var keysDown atomic.Bool
+	keysDown.Store(true)
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/keys" && keysDown.Load() {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	defer testServer.Close()
+
+	conn, err := newConnector(Config{
+		Issuer: testServer.URL,
+		Scopes: []string{"openid", "groups"},
+	})
+	require.NoError(t, err)
+
+	res, err := http.Get(testServer.URL + "/token")
+	require.NoError(t, err)
+	defer res.Body.Close()
+	var tokenResponse map[string]any
+	require.NoError(t, json.NewDecoder(res.Body).Decode(&tokenResponse))
+	idToken := tokenResponse["id_token"].(string)
+
+	const tokenTypeID = "urn:ietf:params:oauth:token-type:id_token"
+	ctx := context.Background()
+
+	var unavailableErr *connector.UpstreamUnavailableError
+	_, err = conn.TokenIdentity(ctx, tokenTypeID, idToken)
+	require.ErrorAs(t, err, &unavailableErr)
+
+	keysDown.Store(false)
+	identity, err := conn.TokenIdentity(ctx, tokenTypeID, idToken)
+	require.NoError(t, err)
+	expectEquals(t, identity.UserID, "subvalue")
+
+	// A token signed with another key does not verify. That is not an outage.
+	otherKey, err := rsa.GenerateKey(rand.Reader, 1024)
+	require.NoError(t, err)
+	forged, err := newToken(&jose.JSONWebKey{Key: otherKey, KeyID: "keyId", Algorithm: "RSA"}, map[string]any{
+		"iss": testServer.URL,
+		"sub": "subvalue",
+		"aud": "clientID",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	require.NoError(t, err)
+	_, err = conn.TokenIdentity(ctx, tokenTypeID, forged)
+	require.Error(t, err)
+	require.False(t, errors.As(err, &unavailableErr), "a token that does not verify is not an upstream outage: %v", err)
+}
+
+func TestTokenIdentityAlgFetchingKeys(t *testing.T) {
+	backend, err := setupServer(map[string]any{"sub": "subvalue"}, true)
+	require.NoError(t, err)
+	defer backend.Close()
+	conn, err := newConnector(Config{Issuer: backend.URL, Scopes: []string{"openid"}})
+	require.NoError(t, err)
+
+	// go-jose puts the header's alg into its parse error, so the token
+	// controls this text. It must not turn into an upstream outage.
+	enc := base64.RawURLEncoding.EncodeToString
+	token := enc([]byte(`{"alg":"fetching keys","kid":"keyId"}`)) + "." + enc([]byte(`{"sub":"subvalue"}`)) + "." + enc([]byte("sig"))
+
+	_, err = conn.TokenIdentity(context.Background(), "urn:ietf:params:oauth:token-type:id_token", token)
+
+	require.Error(t, err)
+	var unavailableErr *connector.UpstreamUnavailableError
+	require.False(t, errors.As(err, &unavailableErr), "a malformed token is not an upstream outage: %v", err)
+}
+
+func TestTokenIdentityCanceled(t *testing.T) {
+	backend, err := setupServer(map[string]any{"sub": "subvalue"}, true)
+	require.NoError(t, err)
+	defer backend.Close()
+	conn, err := newConnector(Config{Issuer: backend.URL, Scopes: []string{"openid"}})
+	require.NoError(t, err)
+	res, err := http.Get(backend.URL + "/token")
+	require.NoError(t, err)
+	defer res.Body.Close()
+	var tokenResponse map[string]any
+	require.NoError(t, json.NewDecoder(res.Body).Decode(&tokenResponse))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = conn.TokenIdentity(ctx, "urn:ietf:params:oauth:token-type:id_token", tokenResponse["id_token"].(string))
+
+	require.Error(t, err)
+	var unavailableErr *connector.UpstreamUnavailableError
+	require.False(t, errors.As(err, &unavailableErr), "a canceled request is not an upstream outage: %v", err)
 }

@@ -4,13 +4,19 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"golang.org/x/oauth2"
 
 	"github.com/dexidp/dex/connector"
 )
@@ -124,6 +130,32 @@ func TestUserGroupsWithTeamNameAndSlugFieldConfig(t *testing.T) {
 	})
 }
 
+// tests case-insensitive org matching and the warn log on case mismatch
+func TestTeamsForOrgCaseInsensitive(t *testing.T) {
+	s := newTestServer(map[string]testResponse{
+		"/user/teams": {
+			data: []team{
+				{Name: "team-1", Org: org{Login: "myorg"}},
+				{Name: "team-2", Org: org{Login: "myorg"}},
+				{Name: "team-3", Org: org{Login: "otherorg"}},
+			},
+		},
+	})
+	defer s.Close()
+
+	var logBuf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	c := githubConnector{apiURL: s.URL, logger: logger}
+
+	for _, configOrg := range []string{"MyOrg", "MYORG", "myOrg"} {
+		groups, err := c.teamsForOrg(context.Background(), newClient(), configOrg)
+		expectNil(t, err)
+		expectEquals(t, groups, []string{"team-1", "team-2"})
+	}
+
+	expectEquals(t, strings.Count(logBuf.String(), "level=WARN"), 3)
+}
+
 // tests that the users login is used as their username when they have no username set
 func TestUsernameIncludedInFederatedIdentity(t *testing.T) {
 	s := newTestServer(map[string]testResponse{
@@ -150,7 +182,7 @@ func TestUsernameIncludedInFederatedIdentity(t *testing.T) {
 	expectNil(t, err)
 
 	c := githubConnector{apiURL: s.URL, hostName: hostURL.Host, httpClient: newClient()}
-	identity, err := c.HandleCallback(connector.Scopes{Groups: true}, req)
+	identity, err := c.HandleCallback(connector.Scopes{Groups: true}, nil, req)
 
 	expectNil(t, err)
 	expectEquals(t, identity.Username, "some-login")
@@ -158,7 +190,7 @@ func TestUsernameIncludedInFederatedIdentity(t *testing.T) {
 	expectEquals(t, 0, len(identity.Groups))
 
 	c = githubConnector{apiURL: s.URL, hostName: hostURL.Host, httpClient: newClient(), loadAllGroups: true}
-	identity, err = c.HandleCallback(connector.Scopes{Groups: true}, req)
+	identity, err = c.HandleCallback(connector.Scopes{Groups: true}, nil, req)
 
 	expectNil(t, err)
 	expectEquals(t, identity.Username, "some-login")
@@ -191,11 +223,453 @@ func TestLoginUsedAsIDWhenConfigured(t *testing.T) {
 	expectNil(t, err)
 
 	c := githubConnector{apiURL: s.URL, hostName: hostURL.Host, httpClient: newClient(), useLoginAsID: true}
-	identity, err := c.HandleCallback(connector.Scopes{Groups: true}, req)
+	identity, err := c.HandleCallback(connector.Scopes{Groups: true}, nil, req)
 
 	expectNil(t, err)
 	expectEquals(t, identity.UserID, "some-login")
 	expectEquals(t, identity.Username, "Joe Bloggs")
+}
+
+func TestHandleCallbackStoresRefreshToken(t *testing.T) {
+	s := newTestServer(map[string]testResponse{
+		"/user": {data: user{Login: "some-login", ID: 12345678, Name: "Joe Bloggs", Email: "some@email.com"}},
+		"/login/oauth/access_token": {data: map[string]interface{}{
+			"access_token":  "access-token",
+			"refresh_token": "refresh-token",
+			"expires_in":    28800,
+		}},
+	})
+	defer s.Close()
+
+	hostURL, err := url.Parse(s.URL)
+	expectNil(t, err)
+
+	req, err := http.NewRequest("GET", hostURL.String(), nil)
+	expectNil(t, err)
+
+	c := githubConnector{apiURL: s.URL, hostName: hostURL.Host, httpClient: newClient()}
+	identity, err := c.HandleCallback(connector.Scopes{OfflineAccess: true}, nil, req)
+	expectNil(t, err)
+
+	var data connectorData
+	if err := json.Unmarshal(identity.ConnectorData, &data); err != nil {
+		t.Fatalf("failed to unmarshal connector data: %v", err)
+	}
+	expectEquals(t, data.AccessToken, "access-token")
+	expectEquals(t, data.RefreshToken, "refresh-token")
+	if data.Expiry.IsZero() || !data.Expiry.After(time.Now()) {
+		t.Fatalf("expected future token expiry, got %v", data.Expiry)
+	}
+}
+
+func TestRefreshUsesRefreshToken(t *testing.T) {
+	var tokenRefreshCalled atomic.Bool
+	s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/login/oauth/access_token":
+			tokenRefreshCalled.Store(true)
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("failed to parse token refresh form: %v", err)
+			}
+			if got := r.Form.Get("grant_type"); got != "refresh_token" {
+				t.Fatalf("expected refresh_token grant type, got %q", got)
+			}
+			if got := r.Form.Get("refresh_token"); got != "old-refresh-token" {
+				t.Fatalf("expected old refresh token, got %q", got)
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token":  "new-access-token",
+				"refresh_token": "new-refresh-token",
+				"expires_in":    28800,
+			})
+		case "/user":
+			if got := r.Header.Get("Authorization"); got != "Bearer new-access-token" {
+				t.Fatalf("expected refreshed access token, got %q", got)
+			}
+			json.NewEncoder(w).Encode(user{Login: "new-login", ID: 12345678, Name: "New User", Email: "new@email.com"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer s.Close()
+
+	hostURL, err := url.Parse(s.URL)
+	expectNil(t, err)
+
+	connData, err := json.Marshal(connectorData{
+		AccessToken:  "old-access-token",
+		RefreshToken: "old-refresh-token",
+		Expiry:       time.Now().Add(-time.Hour),
+	})
+	expectNil(t, err)
+
+	c := githubConnector{
+		apiURL:       s.URL,
+		hostName:     hostURL.Host,
+		httpClient:   newClient(),
+		clientID:     "client-id",
+		clientSecret: "client-secret",
+	}
+	identity, err := c.Refresh(context.Background(), connector.Scopes{OfflineAccess: true}, connector.Identity{ConnectorData: connData})
+	expectNil(t, err)
+
+	if !tokenRefreshCalled.Load() {
+		t.Fatal("expected refresh token request")
+	}
+	expectEquals(t, identity.Username, "New User")
+	expectEquals(t, identity.PreferredUsername, "new-login")
+	expectEquals(t, identity.Email, "new@email.com")
+
+	var data connectorData
+	if err := json.Unmarshal(identity.ConnectorData, &data); err != nil {
+		t.Fatalf("failed to unmarshal connector data: %v", err)
+	}
+	expectEquals(t, data.AccessToken, "new-access-token")
+	expectEquals(t, data.RefreshToken, "new-refresh-token")
+	if data.Expiry.IsZero() || !data.Expiry.After(time.Now()) {
+		t.Fatalf("expected future token expiry, got %v", data.Expiry)
+	}
+}
+
+func TestRefreshWithAccessTokenOnlyConnectorData(t *testing.T) {
+	var tokenEndpointCalled atomic.Bool
+	s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/login/oauth/access_token":
+			tokenEndpointCalled.Store(true)
+			http.Error(w, "unexpected token refresh", http.StatusInternalServerError)
+		case "/user":
+			if got := r.Header.Get("Authorization"); got != "Bearer old-access-token" {
+				t.Fatalf("expected old access token, got %q", got)
+			}
+			json.NewEncoder(w).Encode(user{Login: "some-login", ID: 12345678, Name: "Some User", Email: "some@email.com"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer s.Close()
+
+	hostURL, err := url.Parse(s.URL)
+	expectNil(t, err)
+
+	connData, err := json.Marshal(connectorData{AccessToken: "old-access-token"})
+	expectNil(t, err)
+
+	c := githubConnector{apiURL: s.URL, hostName: hostURL.Host, httpClient: newClient()}
+	identity, err := c.Refresh(context.Background(), connector.Scopes{}, connector.Identity{ConnectorData: connData})
+	expectNil(t, err)
+
+	if tokenEndpointCalled.Load() {
+		t.Fatal("did not expect token refresh request")
+	}
+	expectEquals(t, identity.Username, "Some User")
+	expectEquals(t, identity.PreferredUsername, "some-login")
+	expectEquals(t, identity.Email, "some@email.com")
+	expectEquals(t, identity.ConnectorData, connData)
+}
+
+func TestPreferredEmailDomainConfigured(t *testing.T) {
+	ctx := context.Background()
+	s := newTestServer(map[string]testResponse{
+		"/user": {data: user{Login: "some-login", ID: 12345678, Name: "Joe Bloggs"}},
+		"/user/emails": {
+			data: []userEmail{
+				{
+					Email:    "some@email.com",
+					Verified: true,
+					Primary:  true,
+				},
+				{
+					Email:    "another@email.com",
+					Verified: true,
+					Primary:  false,
+				},
+				{
+					Email:    "some@preferred-domain.com",
+					Verified: true,
+					Primary:  false,
+				},
+				{
+					Email:    "another@preferred-domain.com",
+					Verified: true,
+					Primary:  false,
+				},
+			},
+		},
+	})
+	defer s.Close()
+
+	hostURL, err := url.Parse(s.URL)
+	expectNil(t, err)
+
+	client := newClient()
+	c := githubConnector{apiURL: s.URL, hostName: hostURL.Host, httpClient: client, preferredEmailDomain: "preferred-domain.com"}
+
+	u, err := c.user(ctx, client)
+	expectNil(t, err)
+	expectEquals(t, u.Email, "some@preferred-domain.com")
+}
+
+func TestPreferredEmailDomainConfiguredWithGlob(t *testing.T) {
+	ctx := context.Background()
+	s := newTestServer(map[string]testResponse{
+		"/user": {data: user{Login: "some-login", ID: 12345678, Name: "Joe Bloggs"}},
+		"/user/emails": {
+			data: []userEmail{
+				{
+					Email:    "some@email.com",
+					Verified: true,
+					Primary:  true,
+				},
+				{
+					Email:    "another@email.com",
+					Verified: true,
+					Primary:  false,
+				},
+				{
+					Email:    "some@another.preferred-domain.com",
+					Verified: true,
+					Primary:  false,
+				},
+				{
+					Email:    "some@sub-domain.preferred-domain.co",
+					Verified: true,
+					Primary:  false,
+				},
+			},
+		},
+	})
+	defer s.Close()
+
+	hostURL, err := url.Parse(s.URL)
+	expectNil(t, err)
+
+	client := newClient()
+	c := githubConnector{apiURL: s.URL, hostName: hostURL.Host, httpClient: client, preferredEmailDomain: "*.preferred-domain.co"}
+
+	u, err := c.user(ctx, client)
+	expectNil(t, err)
+	expectEquals(t, u.Email, "some@sub-domain.preferred-domain.co")
+}
+
+func TestPreferredEmailDomainConfigured_UserHasNoPreferredDomainEmail(t *testing.T) {
+	ctx := context.Background()
+	s := newTestServer(map[string]testResponse{
+		"/user": {data: user{Login: "some-login", ID: 12345678, Name: "Joe Bloggs"}},
+		"/user/emails": {
+			data: []userEmail{
+				{
+					Email:    "some@email.com",
+					Verified: true,
+					Primary:  true,
+				},
+				{
+					Email:    "another@email.com",
+					Verified: true,
+					Primary:  false,
+				},
+			},
+		},
+	})
+	defer s.Close()
+
+	hostURL, err := url.Parse(s.URL)
+	expectNil(t, err)
+
+	client := newClient()
+	c := githubConnector{apiURL: s.URL, hostName: hostURL.Host, httpClient: client, preferredEmailDomain: "preferred-domain.com"}
+
+	u, err := c.user(ctx, client)
+	expectNil(t, err)
+	expectEquals(t, u.Email, "some@email.com")
+}
+
+func TestPreferredEmailDomainNotConfigured(t *testing.T) {
+	ctx := context.Background()
+	s := newTestServer(map[string]testResponse{
+		"/user": {data: user{Login: "some-login", ID: 12345678, Name: "Joe Bloggs"}},
+		"/user/emails": {
+			data: []userEmail{
+				{
+					Email:    "some@email.com",
+					Verified: true,
+					Primary:  true,
+				},
+				{
+					Email:    "another@email.com",
+					Verified: true,
+					Primary:  false,
+				},
+				{
+					Email:    "some@preferred-domain.com",
+					Verified: true,
+					Primary:  false,
+				},
+			},
+		},
+	})
+	defer s.Close()
+
+	hostURL, err := url.Parse(s.URL)
+	expectNil(t, err)
+
+	client := newClient()
+	c := githubConnector{apiURL: s.URL, hostName: hostURL.Host, httpClient: client}
+
+	u, err := c.user(ctx, client)
+	expectNil(t, err)
+	expectEquals(t, u.Email, "some@email.com")
+}
+
+func TestPreferredEmailDomainConfigured_Error_BothPrimaryAndPreferredDomainEmailNotFound(t *testing.T) {
+	ctx := context.Background()
+	s := newTestServer(map[string]testResponse{
+		"/user": {data: user{Login: "some-login", ID: 12345678, Name: "Joe Bloggs"}},
+		"/user/emails": {
+			data: []userEmail{
+				{
+					Email:    "some@email.com",
+					Verified: true,
+					Primary:  false,
+				},
+				{
+					Email:    "another@email.com",
+					Verified: true,
+					Primary:  false,
+				},
+				{
+					Email:    "some@preferred-domain.com",
+					Verified: true,
+					Primary:  false,
+				},
+			},
+		},
+	})
+	defer s.Close()
+
+	hostURL, err := url.Parse(s.URL)
+	expectNil(t, err)
+
+	client := newClient()
+	c := githubConnector{apiURL: s.URL, hostName: hostURL.Host, httpClient: client, preferredEmailDomain: "foo.bar"}
+
+	_, err = c.user(ctx, client)
+	expectNotNil(t, err, "Email not found error")
+	expectEquals(t, err.Error(), "github: user has no verified, primary email or preferred-domain email")
+}
+
+func Test_isPreferredEmailDomain(t *testing.T) {
+	client := newClient()
+	tests := []struct {
+		preferredEmailDomain string
+		email                string
+		expected             bool
+	}{
+		{
+			preferredEmailDomain: "example.com",
+			email:                "test@example.com",
+			expected:             true,
+		},
+		{
+			preferredEmailDomain: "example.com",
+			email:                "test@another.com",
+			expected:             false,
+		},
+		{
+			preferredEmailDomain: "*.example.com",
+			email:                "test@my.example.com",
+			expected:             true,
+		},
+		{
+			preferredEmailDomain: "*.example.com",
+			email:                "test@my.another.com",
+			expected:             false,
+		},
+		{
+			preferredEmailDomain: "*.example.com",
+			email:                "test@my.domain.example.com",
+			expected:             false,
+		},
+		{
+			preferredEmailDomain: "*.example.com",
+			email:                "test@sub.domain.com",
+			expected:             false,
+		},
+		{
+			preferredEmailDomain: "*.*.example.com",
+			email:                "test@sub.my.example.com",
+			expected:             true,
+		},
+		{
+			preferredEmailDomain: "*.*.example.com",
+			email:                "test@a.my.google.com",
+			expected:             false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.preferredEmailDomain, func(t *testing.T) {
+			c := githubConnector{apiURL: "apiURL", hostName: "github.com", httpClient: client, preferredEmailDomain: test.preferredEmailDomain}
+			_, domainPart, _ := strings.Cut(test.email, "@")
+			res := c.isPreferredEmailDomain(domainPart)
+
+			expectEquals(t, res, test.expected)
+		})
+	}
+}
+
+func Test_Open_PreferredDomainConfig(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	tests := []struct {
+		preferredEmailDomain string
+		email                string
+		expected             error
+	}{
+		{
+			preferredEmailDomain: "example.com",
+			expected:             nil,
+		},
+		{
+			preferredEmailDomain: "*.example.com",
+			expected:             nil,
+		},
+		{
+			preferredEmailDomain: "*.*.example.com",
+			expected:             nil,
+		},
+		{
+			preferredEmailDomain: "example.*",
+			expected:             errors.New("invalid PreferredEmailDomain: glob pattern cannot end with \"*\""),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.preferredEmailDomain, func(t *testing.T) {
+			c := Config{
+				PreferredEmailDomain: test.preferredEmailDomain,
+			}
+			_, err := c.Open("id", log)
+
+			expectEquals(t, err, test.expected)
+		})
+	}
+}
+
+func TestGetSendsAPIVersionHeader(t *testing.T) {
+	var gotHeader string
+	s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("X-GitHub-Api-Version")
+		w.Header().Add("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]org{})
+	}))
+	defer s.Close()
+
+	var result []org
+	_, err := get(context.Background(), newClient(), s.URL+"/user/orgs", &result)
+	expectNil(t, err)
+	expectEquals(t, gotHeader, githubAPIVersion)
 }
 
 func newTestServer(responses map[string]testResponse) *httptest.Server {
@@ -231,8 +705,53 @@ func expectNil(t *testing.T, a interface{}) {
 	}
 }
 
+func expectNotNil(t *testing.T, a interface{}, msg string) {
+	if a == nil {
+		t.Errorf("Expected %+v to not to be nil", msg)
+	}
+}
+
 func expectEquals(t *testing.T, a interface{}, b interface{}) {
 	if !reflect.DeepEqual(a, b) {
 		t.Errorf("Expected %+v to equal %+v", a, b)
+	}
+}
+
+// TestRefreshUpstreamRejection verifies that a refresh GitHub refuses keeps
+// the upstream's OAuth2 error, so the server can tell a rejected refresh
+// token apart from other failures.
+func TestRefreshUpstreamRejection(t *testing.T) {
+	s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid_grant"})
+	}))
+	defer s.Close()
+
+	hostURL, err := url.Parse(s.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := githubConnector{
+		apiURL:       s.URL,
+		hostName:     hostURL.Host,
+		httpClient:   newClient(),
+		clientID:     "client-id",
+		clientSecret: "client-secret",
+	}
+	connData, err := json.Marshal(connectorData{
+		AccessToken:  "access-token",
+		RefreshToken: "refresh-token",
+		Expiry:       time.Now().Add(-time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = c.Refresh(t.Context(), connector.Scopes{OfflineAccess: true}, connector.Identity{ConnectorData: connData})
+
+	var retrieveErr *oauth2.RetrieveError
+	if !errors.As(err, &retrieveErr) || retrieveErr.ErrorCode != "invalid_grant" {
+		t.Fatalf("expected the upstream invalid_grant in the error chain, got %v", err)
 	}
 }

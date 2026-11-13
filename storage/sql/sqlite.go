@@ -1,3 +1,4 @@
+//go:build cgo
 // +build cgo
 
 package sql
@@ -5,10 +6,10 @@ package sql
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 
 	sqlite3 "github.com/mattn/go-sqlite3"
 
-	"github.com/dexidp/dex/pkg/log"
 	"github.com/dexidp/dex/storage"
 )
 
@@ -19,7 +20,7 @@ type SQLite3 struct {
 }
 
 // Open creates a new storage implementation backed by SQLite3
-func (s *SQLite3) Open(logger log.Logger) (storage.Storage, error) {
+func (s *SQLite3) Open(logger *slog.Logger) (storage.Storage, error) {
 	conn, err := s.open(logger)
 	if err != nil {
 		return nil, err
@@ -27,17 +28,15 @@ func (s *SQLite3) Open(logger log.Logger) (storage.Storage, error) {
 	return conn, nil
 }
 
-func (s *SQLite3) open(logger log.Logger) (*conn, error) {
+func (s *SQLite3) open(logger *slog.Logger) (*conn, error) {
 	db, err := sql.Open("sqlite3", s.File)
 	if err != nil {
 		return nil, err
 	}
-	if s.File == ":memory:" {
-		// sqlite3 uses file locks to coordinate concurrent access. In memory
-		// doesn't support this, so limit the number of connections to 1.
-		db.SetMaxOpenConns(1)
-	}
 
+	// always allow only one connection to sqlite3, any other thread/go-routine
+	// attempting concurrent access will have to wait
+	db.SetMaxOpenConns(1)
 	errCheck := func(err error) bool {
 		sqlErr, ok := err.(sqlite3.Error)
 		if !ok {

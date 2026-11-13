@@ -1,8 +1,10 @@
 # dex - A federated OpenID Connect provider
 
-![GitHub Workflow Status](https://img.shields.io/github/workflow/status/dexidp/dex/CI?style=flat-square)
+![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/dexidp/dex/ci.yaml?style=flat-square&branch=master)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/dexidp/dex/badge?style=flat-square)](https://api.securityscorecards.dev/projects/github.com/dexidp/dex)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/12566/badge)](https://www.bestpractices.dev/projects/12566)
 [![Go Report Card](https://goreportcard.com/badge/github.com/dexidp/dex?style=flat-square)](https://goreportcard.com/report/github.com/dexidp/dex)
-[![Gitpod ready-to-code](https://img.shields.io/badge/Gitpod-ready--to--code-blue?logo=gitpod&style=flat-square)](https://gitpod.io/#https://github.com/dexidp/dex)
+[![LFX Health Score](https://insights.linuxfoundation.org/api/badge/health-score?project=dex)](https://insights.linuxfoundation.org/project/dex/contributors)
 
 ![logo](docs/logos/dex-horizontal-color.png)
 
@@ -12,7 +14,7 @@ Dex acts as a portal to other identity providers through ["connectors."](#connec
 
 ## ID Tokens
 
-ID Tokens are an OAuth2 extension introduced by OpenID Connect and dex's primary feature. ID Tokens are [JSON Web Tokens][jwt-io] (JWTs) signed by dex and returned as part of the OAuth2 response that attest to the end user's identity. An example JWT might look like:
+ID Tokens are an OAuth2 extension introduced by OpenID Connect and dex's primary feature. ID Tokens are [JSON Web Tokens][jwt-io] (JWTs) signed by dex and returned as part of the OAuth2 response that attests to the end user's identity. An example JWT might look like:
 
 ```
 eyJhbGciOiJSUzI1NiIsImtpZCI6IjlkNDQ3NDFmNzczYjkzOGNmNjVkZDMyNjY4NWI4NjE4MGMzMjRkOTkifQ.eyJpc3MiOiJodHRwOi8vMTI3LjAuMC4xOjU1NTYvZGV4Iiwic3ViIjoiQ2djeU16UXlOelE1RWdabmFYUm9kV0kiLCJhdWQiOiJleGFtcGxlLWFwcCIsImV4cCI6MTQ5Mjg4MjA0MiwiaWF0IjoxNDkyNzk1NjQyLCJhdF9oYXNoIjoiYmk5NmdPWFpTaHZsV1l0YWw5RXFpdyIsImVtYWlsIjoiZXJpYy5jaGlhbmdAY29yZW9zLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlLCJncm91cHMiOlsiYWRtaW5zIiwiZGV2ZWxvcGVycyJdLCJuYW1lIjoiRXJpYyBDaGlhbmcifQ.OhROPq_0eP-zsQRjg87KZ4wGkjiQGnTi5QuG877AdJDb3R2ZCOk2Vkf5SdP8cPyb3VMqL32G4hLDayniiv8f1_ZXAde0sKrayfQ10XAXFgZl_P1yilkLdknxn6nbhDRVllpWcB12ki9vmAxklAr0B1C4kr5nI3-BZLrFcUR5sQbxwJj4oW1OuG6jJCNGHXGNTBTNEaM28eD-9nhfBeuBTzzO7BKwPsojjj4C9ogU4JQhGvm_l4yfVi0boSx8c0FX3JsiB0yLa1ZdJVWVl9m90XmbWRSD85pNDQHcWZP9hR6CMgbvGkZsgjG32qeRwUL_eNkNowSBNWLrGNPoON1gMg
@@ -43,14 +45,14 @@ Because these tokens are signed by dex and [contain standard-based claims][stand
 * [Kubernetes][kubernetes]
 * [AWS STS][aws-sts]
 
-For details on how to request or validate an ID Token, see [_"Writing apps that use dex"_][using-dex].
+For details on how to request or validate an ID Token, see [_"Writing apps that use dex"_](https://dexidp.io/docs/using-dex/).
 
 ## Kubernetes and Dex
 
-Dex runs natively on top of any Kubernetes cluster using Custom Resource Definitions and can drive API server authentication through the OpenID Connect plugin. Clients, such as the [`kubernetes-dashboard`](https://github.com/kubernetes/dashboard) and `kubectl`, can act on behalf of users who can login to the cluster through any identity provider dex supports.
+Dex runs natively on top of any Kubernetes cluster using Custom Resource Definitions and can drive API server authentication through the OpenID Connect plugin. Clients, such as [`kubelogin`](https://github.com/int128/kubelogin) and `kubectl`, can act on behalf of users who can login to the cluster through any identity provider dex supports.
 
-* More docs for running dex as a Kubernetes authenticator can be found [here](https://dexidp.io/docs/kubernetes/).
-* You can find more about companies and projects, which uses dex, [here](./ADOPTERS.md).
+* More docs for running dex as a Kubernetes authenticator can be found [here](https://dexidp.io/docs/guides/kubernetes/).
+* You can find more about companies and projects which use dex, [here](./ADOPTERS.md).
 
 ## Connectors
 
@@ -71,14 +73,15 @@ Dex implements the following connectors:
 | [SAML 2.0](https://dexidp.io/docs/connectors/saml/) | no | yes | no | stable | WARNING: Unmaintained and likely vulnerable to auth bypasses ([#1884](https://github.com/dexidp/dex/discussions/1884)) |
 | [GitLab](https://dexidp.io/docs/connectors/gitlab/) | yes | yes | yes | beta | |
 | [OpenID Connect](https://dexidp.io/docs/connectors/oidc/) | yes | yes | yes | beta | Includes Salesforce, Azure, etc. |
+| [OAuth 2.0](https://dexidp.io/docs/connectors/oauth/) | no | yes | yes | alpha | |
 | [Google](https://dexidp.io/docs/connectors/google/) | yes | yes | yes | alpha | |
 | [LinkedIn](https://dexidp.io/docs/connectors/linkedin/) | yes | no | no | beta | |
 | [Microsoft](https://dexidp.io/docs/connectors/microsoft/) | yes | yes | no | beta | |
-| [AuthProxy](https://dexidp.io/docs/connectors/authproxy/) | no | no | no | alpha | Authentication proxies such as Apache2 mod_auth, etc. |
+| [AuthProxy](https://dexidp.io/docs/connectors/authproxy/) | no | yes | no | alpha | Authentication proxies such as Apache2 mod_auth, etc. |
 | [Bitbucket Cloud](https://dexidp.io/docs/connectors/bitbucketcloud/) | yes | yes | no | alpha | |
-| [OpenShift](https://dexidp.io/docs/connectors/openshift/) | no | yes | no | alpha | |
-| [Atlassian Crowd](https://dexidp.io/docs/connectors/atlassiancrowd/) | yes | yes | yes * | beta | preferred_username claim must be configured through config |
-| [Gitea](https://dexidp.io/docs/connectors/gitea/) | yes | no | yes | alpha | |
+| [OpenShift](https://dexidp.io/docs/connectors/openshift/) | yes | yes | no | alpha | |
+| [Atlassian Crowd](https://dexidp.io/docs/connectors/atlassian-crowd/) | yes | yes | yes * | beta | preferred_username claim must be configured through config |
+| [Gitea](https://dexidp.io/docs/connectors/gitea/) | yes | no | yes | beta | |
 | [OpenStack Keystone](https://dexidp.io/docs/connectors/keystone/) | yes | yes | no | alpha | |
 
 Stable, beta, and alpha are defined as:
@@ -91,24 +94,11 @@ All changes or deprecations of connector features will be announced in the [rele
 
 ## Documentation
 
-* [Getting started](https://dexidp.io/docs/getting-started/)
-* [Intro to OpenID Connect](https://dexidp.io/docs/openid-connect/)
-* [Writing apps that use dex][using-dex]
-* [What's new in v2](https://dexidp.io/docs/v2/)
-* [Custom scopes, claims, and client features](https://dexidp.io/docs/custom-scopes-claims-clients/)
-* [Storage options](https://dexidp.io/docs/storage/)
-* [gRPC API](https://dexidp.io/docs/api/)
-* [Using Kubernetes with dex](https://dexidp.io/docs/kubernetes/)
-* Client libraries
-  * [Go][go-oidc]
+See the [official documentation](https://dexidp.io/docs/) for getting started, configuration, and usage guides.
 
-## Reporting a security vulnerability
+## Reporting a vulnerability
 
-Due to their public nature, GitHub and mailing lists are NOT appropriate places
-for reporting vulnerabilities.
-
-Please email the [maintainers list](mailto:cncf-dex-maintainers@lists.cncf.io) to report issues that may
-be security-related.
+Please see our [security policy](.github/SECURITY.md) for details about reporting vulnerabilities.
 
 ## Getting help
 
@@ -116,15 +106,19 @@ be security-related.
 - For general discussion about both using and developing Dex:
     - join the [#dexidp](https://cloud-native.slack.com/messages/dexidp) on the CNCF Slack
     - open a new [discussion](https://github.com/dexidp/dex/discussions)
-    - join the [dex-dev](https://groups.google.com/forum/#!forum/dex-dev) mailing list
 
 [openid-connect]: https://openid.net/connect/
 [standard-claims]: https://openid.net/specs/openid-connect-core-1_0.html#StandardClaims
 [scopes]: https://dexidp.io/docs/custom-scopes-claims-clients/#scopes
-[using-dex]: https://dexidp.io/docs/using-dex/
 [jwt-io]: https://jwt.io/
-[kubernetes]: http://kubernetes.io/docs/admin/authentication/#openid-connect-tokens
+[kubernetes]: https://kubernetes.io/docs/reference/access-authn-authz/authentication/#openid-connect-tokens
 [aws-sts]: https://docs.aws.amazon.com/STS/latest/APIReference/Welcome.html
-[go-oidc]: https://github.com/coreos/go-oidc
-[issue-1065]: https://github.com/dexidp/dex/issues/1065
 [release-notes]: https://github.com/dexidp/dex/releases
+
+## Contributing
+
+Please see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, guidelines, and how to submit pull requests.
+
+## License
+
+The project is licensed under the [Apache License, Version 2.0](LICENSE).

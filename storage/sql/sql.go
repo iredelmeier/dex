@@ -3,14 +3,13 @@ package sql
 
 import (
 	"database/sql"
+	"log/slog"
 	"regexp"
 	"time"
 
 	// import third party drivers
 	_ "github.com/lib/pq"
 	_ "github.com/mattn/go-sqlite3"
-
-	"github.com/dexidp/dex/pkg/log"
 )
 
 // flavor represents a specific SQL implementation, and is used to translate query strings
@@ -24,6 +23,11 @@ type flavor struct {
 
 	// Does the flavor support timezones?
 	supportsTimezones bool
+
+	// Does the flavor reject the zero time.Time? The MySQL driver sends it
+	// as '0000-00-00', which the default sql_mode (NO_ZERO_DATE with
+	// STRICT_TRANS_TABLES) refuses for datetime columns.
+	rejectsZeroTime bool
 }
 
 // A regexp with a replacement string.
@@ -96,10 +100,11 @@ var (
 			// For compound indexes (with two keys) even less.
 			{matchLiteral("text"), "varchar(384)"},
 			// Quote keywords and reserved words used as identifiers.
-			{regexp.MustCompile(`\b(keys)\b`), "`$1`"},
+			{regexp.MustCompile(`\b(keys|groups)\b`), "`$1`"},
 			// Change default timestamp to fit datetime.
 			{regexp.MustCompile(`0001-01-01 00:00:00 UTC`), "1000-01-01 00:00:00"},
 		},
+		rejectsZeroTime: true,
 	}
 )
 
@@ -121,17 +126,33 @@ func (c *conn) translateArgs(args []interface{}) []interface{} {
 
 	for i, arg := range args {
 		if t, ok := arg.(time.Time); ok {
+			if t.IsZero() && c.flavor.rejectsZeroTime {
+				t = unsetTime
+			}
 			args[i] = t.UTC()
 		}
 	}
 	return args
 }
 
+// unsetTime is stored instead of the zero time.Time where the database
+// cannot hold it. It matches the default of the auth_time columns.
+var unsetTime = time.Unix(0, 0).UTC()
+
+// fromStoredTime maps unsetTime back to the zero time.Time, so an unset
+// timestamp reads back as unset on every flavor.
+func fromStoredTime(t time.Time) time.Time {
+	if t.Equal(unsetTime) {
+		return time.Time{}
+	}
+	return t
+}
+
 // conn is the main database connection.
 type conn struct {
 	db                 *sql.DB
 	flavor             *flavor
-	logger             log.Logger
+	logger             *slog.Logger
 	alreadyExistsCheck func(err error) bool
 }
 
